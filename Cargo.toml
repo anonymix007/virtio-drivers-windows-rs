@@ -1,0 +1,46 @@
+cargo-features = ["trim-paths"]
+
+[workspace]
+resolver = "3"
+members = ["wdk"]
+
+[workspace.package]
+edition = "2024"
+license = "CC BY-NC-SA"
+
+[workspace.dependencies]
+atomicbox = "0.4.0"
+bindgen = "0.72.1"
+bitflags = "2.11.0"
+chrono = "0.4.44"
+cc = "1.1"
+crossbeam = { version = "0.8.4", features = ["alloc"], default-features = false }
+log = "0.4.29"
+spin = { version = "0.10.0", features = ["fair_mutex"] }
+uart_16550 = "0.4.0"
+zerocopy = { version = "0.8.42", features = ["derive"] }
+winresult = "0.1.3"
+ida-rs = "0.1.1"
+pin-init = { git = "https://github.com/Rust-for-Linux/pin-init", features = ["alloc"], default-features = false }
+smallvec = { version = "1.15.1", features = ["union", "const_generics", "const_new"] }
+hashbrown = "0.17.1"
+nonmax = { version = "0.5.5", default-features = false }
+modular-bitfield = "0.13.1"
+itertools =  { version = "0.15.0", default-features = false }
+
+[profile.dev]
+opt-level = 'z'
+panic = "abort"
+lto = true
+trim-paths = "all"
+# Literally half of all panics comes from this. I'd rather get an incorrect result, see it in the logs and immediately fix without going to the safe mode
+overflow-checks = false
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+trim-paths = "all"
+lto = true
+debug = true
+rpath = false
+strip = true

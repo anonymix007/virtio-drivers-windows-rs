@@ -1,0 +1,4 @@
+/target
+/PRIVATE
+*.env
+*.geany

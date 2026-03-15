@@ -1,0 +1,42 @@
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+rustflags = [
+  "--cfg", "windows_raw_dylib",
+  "-C", "control-flow-guard=yes",
+  "-C", "linker-flavor=msvc-lld",
+  "-Z", "unstable-options",
+  "-Z", "macro-backtrace",
+
+  # Pre Link Args
+  "-Z", "pre-link-arg=/NOLOGO",
+  "-Z", "pre-link-arg=/NXCOMPAT",
+  "-Z", "pre-link-arg=/NODEFAULTLIB",
+  "-Z", "pre-link-arg=/SUBSYSTEM:NATIVE,10.0",
+  "-Z", "pre-link-arg=/VERSION:10.0",
+  "-Z", "pre-link-arg=/DRIVER",
+  "-Z", "pre-link-arg=/KERNEL",
+  "-Z", "pre-link-arg=/DYNAMICBASE",
+  "-Z", "pre-link-arg=/MANIFEST:NO",
+  "-Z", "pre-link-arg=/OPT:REF,ICF",
+
+  # Post Link Args
+  "-C", "link-arg=/OPT:REF,ICF",
+  "-C", "link-arg=/ENTRY:driver_entry",
+  "-C", "link-arg=/MERGE:.btext=.text",
+  "-C", "link-arg=/MERGE:.edata=.rdata",
+  "-C", "link-arg=/MERGE:.rustc=.data",
+  # "-C", "link-arg=/INTEGRITYCHECK",
+
+  "-C", "link-arg=/MERGE:.retplne=INIT",
+  "-C", "link-arg=/SECTION:.text,PRE",
+  "-C", "link-arg=/SECTION:.rdata,PR",
+  "-C", "link-arg=/SECTION:.data,PRW",
+  "-C", "link-arg=/SECTION:.pdata,PR",
+  "-C", "link-arg=/SECTION:INIT,DRE",
+]
+
+[unstable]
+build-std = ["core", "alloc", "std"]
