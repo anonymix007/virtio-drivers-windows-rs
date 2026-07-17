@@ -14,7 +14,7 @@ pub use registers::Registers;
 const MS_SUCCEEDED: u32 = 0x0;
 
 /// Type alias for a function that converts a pointer to a function and executes it.
-type ProcExecutor = unsafe extern "system" fn(*mut c_void);
+type ProcExecutor = unsafe extern "C" fn(*mut c_void);
 
 /// Internal function that converts a pointer to a function and executes it.
 ///
@@ -22,7 +22,7 @@ type ProcExecutor = unsafe extern "system" fn(*mut c_void);
 ///
 /// * `proc` - A pointer to the procedure to execute.
 #[inline(always)]
-unsafe extern "system" fn proc_executor<F>(proc: *mut c_void)
+unsafe extern "C" fn proc_executor<F>(proc: *mut c_void)
 where
     F: FnMut(),
 {

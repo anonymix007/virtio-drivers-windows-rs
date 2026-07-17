@@ -1,7 +1,18 @@
 #include <stdint.h>
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+//#define WIN32_LEAN_AND_MEAN
+//#include <windows.h>
+
+//#include <minwindef.h>
+
+#include <ntstatus.h>
+#include <ntddk.h>
+#include <ntintsafe.h>
+
+typedef PEXCEPTION_POINTERS LPEXCEPTION_POINTERS;
+#ifndef CALLBACK
+#define CALLBACK
+#endif
 
 #define MS_SUCCEEDED 0x0
 #define MS_CATCHED 0x1

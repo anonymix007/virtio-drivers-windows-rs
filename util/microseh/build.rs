@@ -1,3 +1,5 @@
+use ewdk::*;
+
 fn main() {
     // NOTE: this is a hack to allow this crate to build on docs.rs.
     //       https://github.com/sonodima/microseh/pull/11#issuecomment-2385633164
@@ -8,5 +10,10 @@ fn main() {
         return;
     }
 
-    cc::Build::new().file("src/stub.c").compile("sehstub");
+    println!("cargo:rerun-if-changed=build.rs");
+
+    ewdk_cc()
+        .flag("-c")
+        .file("src/stub.c")
+        .compile("sehstub");
 }
