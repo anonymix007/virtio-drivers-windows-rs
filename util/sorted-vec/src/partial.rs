@@ -2,8 +2,8 @@
 //!
 //! It is a runtime panic if an incomparable element is compared.
 
-use std;
-use std::hash::{Hash, Hasher};
+use core;
+use core::hash::{Hash, Hasher};
 
 
 /// Forward sorted vector

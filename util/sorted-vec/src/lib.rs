@@ -15,7 +15,7 @@
 #[cfg(feature = "serde")]
 #[macro_use] extern crate serde;
 
-use std::hash::{Hash, Hasher};
+use core::hash::{Hash, Hasher};
 
 pub mod partial;
 
