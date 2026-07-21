@@ -80,7 +80,7 @@ where
 }
 
 /// A single allocation.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Allocation<NI = u32>
 where
     NI: NodeIndex,
