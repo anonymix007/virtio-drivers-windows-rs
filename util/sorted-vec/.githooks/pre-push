@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+set -e
+
+echo "+ git status --porcelain"
+git_status="$(git status --porcelain)"
+if [ "$git_status" != "" ]; then
+  echo "$git_status"
+  echo "pre-push hook failed: working directory is dirty"
+  exit 1
+fi
+echo "working directory is clean"
+
+set -x
+
+command -v rg >/dev/null 2>&1 || { echo "rg command not found"; exit 1; }
+if rg "FIXME" --hidden --glob="!$0" "$PWD"; then
+  echo "pre-push hook failed: FIXME not allowed"
+  exit 1
+fi
+cargo +nightly udeps --all-targets --all-features
+export RUSTFLAGS="-D warnings"
+cargo clippy --all-targets --all-features
+cargo test --all-features
+glab ci lint
+
+exit 0

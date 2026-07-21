@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+set -e
+set -x
+
+cargo check --all-targets --all-features
+
+exit 0

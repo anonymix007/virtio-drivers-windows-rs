@@ -1,0 +1,7 @@
+include:
+  - project: 'spearman/ci-templates'
+    file: 'templates/rust.yml'
+
+variables:
+  RUST_CI_IMAGE: "rust:1.89"
+  RUSTUP_TOOLCHAIN: "1.89"
