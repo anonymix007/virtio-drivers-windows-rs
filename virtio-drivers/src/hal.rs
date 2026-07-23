@@ -127,7 +127,7 @@ pub unsafe trait Hal {
     ///
     /// The `paddr` and `size` must describe a valid MMIO region. The implementation may validate it
     /// in some way (and panic if it is invalid) but is not guaranteed to.
-    unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8>;
+    unsafe fn mmio_phys_to_virt(&self, paddr: PhysAddr, size: usize) -> NonNull<u8>;
 
     /// Shares the given memory range with the device, and returns the physical address that the
     /// device can use to access it.

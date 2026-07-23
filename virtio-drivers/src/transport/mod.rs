@@ -191,7 +191,7 @@ bitflags! {
 /// The set of interrupts which were pending
 ///
 /// Ref: 4.1.4.5 ISR status capability
-#[derive(Copy, Clone, Default, Eq, FromBytes, PartialEq)]
+#[derive(Copy, Clone, Default, Debug, Eq, FromBytes, PartialEq)]
 pub struct InterruptStatus(u32);
 
 bitflags! {

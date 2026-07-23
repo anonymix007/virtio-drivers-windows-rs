@@ -25,7 +25,7 @@ use core::ptr;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU16, Ordering, fence};
 use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
-
+use pin_init::*;
 /// The mechanism for bulk data transport on virtio devices.
 ///
 /// Each device can have zero or more virtqueues.
@@ -75,6 +75,122 @@ pub struct VirtQueue<H: Hal, const SIZE: usize> {
 impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
     const SIZE_OK: () = assert!(SIZE.is_power_of_two() && SIZE <= u16::MAX as usize);
 
+    pub fn init<T: Transport> (
+        transport: &mut T,
+        idx: u16,
+        #[allow(unused)]
+        indirect: bool,
+        event_idx: bool,
+        access_platform: bool,
+    ) -> impl Init<Self, Error> {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::SIZE_OK;
+
+        let size = SIZE as u16;
+
+        init_scope(move || {
+            if transport.queue_used(idx) {
+                return Err(Error::AlreadyUsed);
+            }
+            if transport.max_queue_size(idx) < SIZE as u32 {
+                return Err(Error::InvalidParam);
+            }
+
+            let layout = if transport.requires_legacy_layout() {
+                VirtQueueLayout::allocate_legacy(size, access_platform)?
+            } else {
+                VirtQueueLayout::allocate_flexible(size, access_platform)?
+            };
+
+            transport.queue_set(
+                idx,
+                size.into(),
+                layout.descriptors_paddr(),
+                layout.driver_area_paddr(),
+                layout.device_area_paddr(),
+            );
+
+            let desc =
+                NonNull::slice_from_raw_parts(layout.descriptors_vaddr().cast::<Descriptor>(), SIZE);
+            let avail = layout.avail_vaddr().cast();
+            let used = layout.used_vaddr().cast();
+
+            for i in 0..(size - 1) {
+                // SAFETY: `desc` is properly aligned, dereferenceable, initialised,
+                // and the device won't access the descriptors for the duration of this unsafe block.
+                unsafe {
+                    (*desc.as_ptr())[i as usize].next = i + 1;
+                }
+            }
+
+            let init_desc_shadow = init_array_from_fn(|i| Descriptor {
+                addr: 0,
+                len: 0,
+                flags: DescFlags::empty(),
+                next: if i < SIZE {
+                    (i + 1) as u16
+                } else {
+                    0
+                },
+            });
+
+            Ok(init!(Self {
+                layout,
+                desc,
+                avail,
+                used,
+                queue_idx: idx,
+                num_used: 0,
+                free_head: 0,
+                desc_shadow <- init_desc_shadow,
+                avail_idx: 0,
+                last_used_idx: 0,
+                event_idx,
+                access_platform,
+                #[cfg(feature = "alloc")]
+                indirect,
+                #[cfg(feature = "alloc")]
+                indirect_lists <- init_array_from_fn(|_| None),
+            }? Error))
+        })
+
+        /*unsafe {
+            init_from_closure(move |slot: *mut VirtQueue<H, SIZE>| {
+
+
+
+                (&raw mut (*slot).layout).write(layout);
+                (&raw mut (*slot).desc).write(desc);
+                (&raw mut (*slot).avail).write(avail);
+                (&raw mut (*slot).used).write(used);
+                (&raw mut (*slot).queue_idx).write(idx);
+                (&raw mut (*slot).num_used).write(0);
+                (&raw mut (*slot).free_head).write(0);
+                (&raw mut (*slot).desc_shadow).write_bytes(0, 1);
+
+                let desc_shadow = NonNull::slice_from_raw_parts(NonNull::new_unchecked((*slot).desc_shadow.as_mut_ptr()), SIZE);
+
+                for i in 0..(size - 1) {
+                    (*desc_shadow.as_ptr())[i as usize].next = i + 1;
+                    (*desc.as_ptr())[i as usize].next = i + 1;
+                }
+
+                (&raw mut (*slot).avail_idx).write(0);
+                (&raw mut (*slot).last_used_idx).write(0);
+                (&raw mut (*slot).event_idx).write(event_idx);
+                (&raw mut (*slot).access_platform).write(access_platform);
+                #[cfg(feature = "alloc")]
+                (&raw mut (*slot).indirect).write(indirect);
+                #[cfg(feature = "alloc")]
+                for i in 0..size {
+                    (*slot).indirect_lists.as_mut_ptr().add(i as usize).write(None);
+                }
+
+                Ok(())
+            })
+        }*/
+    }
+
     /// Creates a new VirtQueue.
     ///
     /// * `indirect`: Whether to use indirect descriptors. This should be set if the
@@ -85,6 +201,7 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
     pub fn new<T: Transport>(
         transport: &mut T,
         idx: u16,
+        #[allow(unused)]
         indirect: bool,
         event_idx: bool,
         access_platform: bool,
@@ -596,6 +713,52 @@ enum VirtQueueLayout<H: Hal> {
         avail_offset: usize,
     },
 }
+
+pub struct FakeHal;
+
+/// Fake HAL implementation for use in unit tests.
+unsafe impl Hal for FakeHal {
+    fn dma_alloc(
+        _pages: usize,
+        _direction: BufferDirection,
+        _access_platform: bool,
+    ) -> (PhysAddr, NonNull<u8>) {
+        todo!()
+    }
+
+    unsafe fn dma_dealloc(
+        _paddr: PhysAddr,
+        _vaddr: NonNull<u8>,
+        _pages: usize,
+        _access_platform: bool,
+    ) -> i32 {
+        todo!()
+    }
+
+    unsafe fn mmio_phys_to_virt(&self, _paddr: PhysAddr, _size: usize) -> NonNull<u8> {
+        todo!()
+    }
+
+    unsafe fn share(
+        _buffer: NonNull<[u8]>,
+        _direction: BufferDirection,
+        _access_platform: bool,
+    ) -> PhysAddr {
+        todo!()
+    }
+
+    unsafe fn unshare(
+        _paddr: PhysAddr,
+        _buffer: NonNull<[u8]>,
+        _direction: BufferDirection,
+        _access_platform: bool,
+    ) {
+        todo!()
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<VirtQueueLayout<FakeHal>>() == 72);
+const _: () = assert!(core::mem::size_of::<Dma<FakeHal>>() == 32);
 
 impl<H: Hal> VirtQueueLayout<H> {
     /// Allocates a single DMA region containing all parts of the virtqueue, following the layout

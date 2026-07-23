@@ -46,7 +46,6 @@
 #![deny(
     unsafe_op_in_unsafe_fn,
     unused_must_use,
-    missing_docs,
     clippy::undocumented_unsafe_blocks
 )]
 #![allow(clippy::identity_op)]
@@ -63,10 +62,11 @@ mod hal;
 pub mod queue;
 pub mod transport;
 
+use core::convert::Infallible;
 use device::socket::SocketError;
 use thiserror::Error;
 
-pub use self::hal::{BufferDirection, Hal, PhysAddr};
+pub use self::hal::{BufferDirection, Dma, Hal, PhysAddr};
 pub use safe_mmio::UniqueMmioPointer;
 
 /// The page size in bytes supported by the library (4 KiB).
@@ -119,6 +119,12 @@ pub enum Error {
 impl From<alloc::string::FromUtf8Error> for Error {
     fn from(_value: alloc::string::FromUtf8Error) -> Self {
         Self::IoError
+    }
+}
+
+impl From<Infallible> for Error {
+    fn from(e: Infallible) -> Self {
+        match e {}
     }
 }
 

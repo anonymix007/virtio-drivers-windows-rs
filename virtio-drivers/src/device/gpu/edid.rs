@@ -117,8 +117,8 @@ impl DetailedTiming {
 /// Wraps the raw EDID byte blob and provides methods to extract display
 /// information such as preferred resolution and supported standard timings.
 pub struct Edid {
-    pub(super) data: [u8; 1024],
-    pub(super) size: u32,
+    pub data: [u8; 1024],
+    pub size: u32,
 }
 
 impl Edid {

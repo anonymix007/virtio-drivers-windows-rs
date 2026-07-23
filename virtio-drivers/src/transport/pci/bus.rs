@@ -429,7 +429,7 @@ impl ConfigurationAccess for MmioCam<'_> {
 unsafe impl Sync for MmioCam<'_> {}
 
 /// Information about a PCI Base Address Register.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BarInfo {
     /// The BAR is for a memory region.
     Memory {

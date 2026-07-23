@@ -1,8 +1,11 @@
 //! Driver for VirtIO GPU devices.
 
+pub mod commands;
 mod edid;
 
 pub use self::edid::Edid;
+
+use self::commands::*;
 
 use crate::config::{ReadOnly, WriteOnly, read_config};
 use crate::hal::{BufferDirection, Dma, Hal};
@@ -13,7 +16,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use bitflags::bitflags;
 use log::info;
-use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes, KnownLayout};
+use zerocopy::{FromBytes, FromZeros, Immutable, IntoBytes};
 
 const QUEUE_SIZE: u16 = 2;
 const SUPPORTED_FEATURES: Features = Features::RING_EVENT_IDX
@@ -21,6 +24,8 @@ const SUPPORTED_FEATURES: Features = Features::RING_EVENT_IDX
     .union(Features::VERSION_1)
     .union(Features::ACCESS_PLATFORM)
     .union(Features::EDID);
+
+pub const VIRTIO_GPU_SHM_ID_HOST_VISIBLE: u8 = 1;
 
 /// A virtio based graphics adapter.
 ///
@@ -109,7 +114,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     /// Get the resolution (width, height).
     pub fn resolution(&mut self) -> Result<(u32, u32)> {
         let display_info = self.get_display_info()?;
-        Ok((display_info.rect.width, display_info.rect.height))
+        Ok((display_info.pmodes[SCANOUT_ID as usize].rect.width, display_info.pmodes[SCANOUT_ID as usize].rect.height))
     }
 
     /// Get the EDID data for the specified scanout.
@@ -120,7 +125,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
         if !self.has_edid {
             return Err(Error::Unsupported);
         }
-        let rsp: RespEdid = self.request(CmdGetEdid {
+        let rsp: RespGetEdid = self.request(GetEdid {
             header: CtrlHeader::with_type(Command::GET_EDID),
             scanout,
             _padding: 0,
@@ -154,7 +159,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     pub fn setup_framebuffer(&mut self) -> Result<&mut [u8]> {
         let display_info = self.get_display_info()?;
         info!("=> {:?}", display_info);
-        self.change_resolution(display_info.rect.width, display_info.rect.height)
+        self.change_resolution(display_info.pmodes[SCANOUT_ID as usize].rect.width, display_info.pmodes[SCANOUT_ID as usize].rect.height)
     }
 
     /// Set or change the framebuffer resolution. If a framebuffer already exists, tears down the
@@ -291,10 +296,10 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     }
 
     fn resource_create_2d(&mut self, resource_id: u32, width: u32, height: u32) -> Result {
-        let rsp: CtrlHeader = self.request(ResourceCreate2D {
+        let rsp: CtrlHeader = self.request(ResourceCreate2d {
             header: CtrlHeader::with_type(Command::RESOURCE_CREATE_2D),
             resource_id,
-            format: Format::B8G8R8A8UNORM,
+            format: Format::B8G8R8A8UNORM as u32,
             width,
             height,
         })?;
@@ -322,7 +327,7 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     }
 
     fn transfer_to_host_2d(&mut self, rect: Rect, offset: u64, resource_id: u32) -> Result {
-        let rsp: CtrlHeader = self.request(TransferToHost2D {
+        let rsp: CtrlHeader = self.request(TransferToHost2d {
             header: CtrlHeader::with_type(Command::TRANSFER_TO_HOST_2D),
             rect,
             offset,
@@ -333,13 +338,17 @@ impl<H: Hal, T: Transport> VirtIOGpu<H, T> {
     }
 
     fn resource_attach_backing(&mut self, resource_id: u32, paddr: u64, length: u32) -> Result {
-        let rsp: CtrlHeader = self.request(ResourceAttachBacking {
-            header: CtrlHeader::with_type(Command::RESOURCE_ATTACH_BACKING),
-            resource_id,
-            nr_entries: 1,
-            addr: paddr,
-            length,
-            _padding: 0,
+        let rsp: CtrlHeader = self.request(ResourceAttachBackingSingleEntry {
+            header: ResourceAttachBacking {
+                header: CtrlHeader::with_type(Command::RESOURCE_ATTACH_BACKING),
+                resource_id,
+                nr_entries: 1,
+            },
+            entry: MemEntry {
+                addr: paddr,
+                length,
+                _padding: 0,
+            },
         })?;
         rsp.check_type(Command::OK_NODATA)
     }
@@ -403,29 +412,41 @@ impl<H: Hal, T: Transport> Drop for VirtIOGpu<H, T> {
 }
 
 #[repr(C)]
-struct Config {
+pub struct Config {
     /// Signals pending events to the driver。
-    events_read: ReadOnly<u32>,
+    pub events_read: ReadOnly<u32>,
 
     /// Clears pending events in the device.
-    events_clear: WriteOnly<u32>,
+    pub events_clear: WriteOnly<u32>,
 
     /// Specifies the maximum number of scanouts supported by the device.
     ///
     /// Minimum value is 1, maximum value is 16.
-    num_scanouts: ReadOnly<u32>,
+    pub num_scanouts: ReadOnly<u32>,
+
+    /// Specifies the maximum number of capability sets supported by the device.
+    ///
+    /// Minimum value is 0
+    pub num_capsets: ReadOnly<u32>,
 }
 
 /// Display configuration has changed.
 const EVENT_DISPLAY: u32 = 1 << 0;
 
 bitflags! {
+    /// Device specific features for virtio based graphics adapter.
     #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-    struct Features: u64 {
+    pub struct Features: u64 {
         /// virgl 3D mode is supported.
         const VIRGL                 = 1 << 0;
         /// EDID is supported.
         const EDID                  = 1 << 1;
+        /// Assigning UUID to resources is supported.
+        const RESOURCE_UUID         = 1 << 2;
+        /// Blob resources are supported.
+        const RESOURCE_BLOB         = 1 << 3;
+        /// Initializing contexts is supported.
+        const CONTEXT_INIT          = 1 << 4;
 
         // device independent
         const NOTIFY_ON_EMPTY       = 1 << 24; // legacy
@@ -445,198 +466,8 @@ bitflags! {
     }
 }
 
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Eq, FromBytes, Immutable, IntoBytes, KnownLayout, PartialEq)]
-struct Command(u32);
-
-impl Command {
-    const GET_DISPLAY_INFO: Command = Command(0x100);
-    const RESOURCE_CREATE_2D: Command = Command(0x101);
-    const RESOURCE_UNREF: Command = Command(0x102);
-    const SET_SCANOUT: Command = Command(0x103);
-    const RESOURCE_FLUSH: Command = Command(0x104);
-    const TRANSFER_TO_HOST_2D: Command = Command(0x105);
-    const RESOURCE_ATTACH_BACKING: Command = Command(0x106);
-    const RESOURCE_DETACH_BACKING: Command = Command(0x107);
-    const GET_CAPSET_INFO: Command = Command(0x108);
-    const GET_CAPSET: Command = Command(0x109);
-    const GET_EDID: Command = Command(0x10a);
-
-    const UPDATE_CURSOR: Command = Command(0x300);
-    const MOVE_CURSOR: Command = Command(0x301);
-
-    const OK_NODATA: Command = Command(0x1100);
-    const OK_DISPLAY_INFO: Command = Command(0x1101);
-    const OK_CAPSET_INFO: Command = Command(0x1102);
-    const OK_CAPSET: Command = Command(0x1103);
-    const OK_EDID: Command = Command(0x1104);
-
-    const ERR_UNSPEC: Command = Command(0x1200);
-    const ERR_OUT_OF_MEMORY: Command = Command(0x1201);
-    const ERR_INVALID_SCANOUT_ID: Command = Command(0x1202);
-}
-
-const GPU_FLAG_FENCE: u32 = 1 << 0;
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, IntoBytes, KnownLayout)]
-struct CtrlHeader {
-    hdr_type: Command,
-    flags: u32,
-    fence_id: u64,
-    ctx_id: u32,
-    _padding: u32,
-}
-
-impl CtrlHeader {
-    fn with_type(hdr_type: Command) -> CtrlHeader {
-        CtrlHeader {
-            hdr_type,
-            flags: 0,
-            fence_id: 0,
-            ctx_id: 0,
-            _padding: 0,
-        }
-    }
-
-    /// Return error if the type is not same as expected.
-    fn check_type(&self, expected: Command) -> Result {
-        if self.hdr_type == expected {
-            Ok(())
-        } else {
-            Err(Error::IoError)
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone, Default, FromBytes, Immutable, IntoBytes, KnownLayout)]
-struct Rect {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, FromBytes, Immutable, KnownLayout)]
-struct RespDisplayInfo {
-    header: CtrlHeader,
-    rect: Rect,
-    enabled: u32,
-    flags: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct CmdGetEdid {
-    header: CtrlHeader,
-    scanout: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, FromBytes, Immutable, KnownLayout)]
-struct RespEdid {
-    header: CtrlHeader,
-    size: u32,
-    _padding: u32,
-    edid: [u8; 1024],
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct ResourceCreate2D {
-    header: CtrlHeader,
-    resource_id: u32,
-    format: Format,
-    width: u32,
-    height: u32,
-}
-
-#[repr(u32)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-enum Format {
-    B8G8R8A8UNORM = 1,
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct ResourceAttachBacking {
-    header: CtrlHeader,
-    resource_id: u32,
-    nr_entries: u32, // always 1
-    addr: u64,
-    length: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct ResourceDetachBacking {
-    header: CtrlHeader,
-    resource_id: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct ResourceUnref {
-    header: CtrlHeader,
-    resource_id: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct SetScanout {
-    header: CtrlHeader,
-    rect: Rect,
-    scanout_id: u32,
-    resource_id: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct TransferToHost2D {
-    header: CtrlHeader,
-    rect: Rect,
-    offset: u64,
-    resource_id: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Immutable, IntoBytes, KnownLayout)]
-struct ResourceFlush {
-    header: CtrlHeader,
-    rect: Rect,
-    resource_id: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Immutable, IntoBytes, KnownLayout)]
-struct CursorPos {
-    scanout_id: u32,
-    x: u32,
-    y: u32,
-    _padding: u32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Immutable, IntoBytes, KnownLayout)]
-struct UpdateCursor {
-    header: CtrlHeader,
-    pos: CursorPos,
-    resource_id: u32,
-    hot_x: u32,
-    hot_y: u32,
-    _padding: u32,
-}
-
-const QUEUE_TRANSMIT: u16 = 0;
-const QUEUE_CURSOR: u16 = 1;
+pub const QUEUE_TRANSMIT: u16 = 0;
+pub const QUEUE_CURSOR: u16 = 1;
 
 const SCANOUT_ID: u32 = 0;
 const RESOURCE_ID_FB: u32 = 0xbabe;

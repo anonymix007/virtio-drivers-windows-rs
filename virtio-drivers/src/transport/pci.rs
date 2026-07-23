@@ -10,6 +10,7 @@ use crate::{
     Error,
     hal::{Hal, PhysAddr},
     transport::InterruptStatus,
+    device::gpu::VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
 };
 use core::{
     mem::{align_of, size_of},
@@ -44,6 +45,10 @@ pub(crate) const CAP_BAR_OFFSET_OFFSET: u8 = 8;
 pub(crate) const CAP_LENGTH_OFFSET: u8 = 12;
 /// The offset of the`notify_off_multiplier` field within `virtio_pci_notify_cap`.
 pub(crate) const CAP_NOTIFY_OFF_MULTIPLIER_OFFSET: u8 = 16;
+/// The offset of the `offset_hi` field within `virtio_pci_cap64`.
+pub(crate) const CAP_BAR_OFFSET_HI_OFFSET: u8 = 16;
+/// The offset of the `length_hi` field within `virtio_pci_cap64`.
+pub(crate) const CAP_BAR_LENGTH_HI_OFFSET: u8 = 20;
 
 /// Common configuration.
 pub const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
@@ -53,6 +58,8 @@ pub const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;
 pub const VIRTIO_PCI_CAP_ISR_CFG: u8 = 3;
 /// Device specific configuration.
 pub const VIRTIO_PCI_CAP_DEVICE_CFG: u8 = 4;
+/// Shared memory region
+pub const VIRTIO_PCI_CAP_SHARED_MEMORY_CFG: u8 = 8;
 
 pub(crate) fn device_type(pci_device_id: u16) -> Option<DeviceType> {
     match pci_device_id {
@@ -63,6 +70,7 @@ pub(crate) fn device_type(pci_device_id: u16) -> Option<DeviceType> {
         TRANSITIONAL_SCSI_HOST => Some(DeviceType::ScsiHost),
         TRANSITIONAL_ENTROPY_SOURCE => Some(DeviceType::EntropySource),
         TRANSITIONAL_9P_TRANSPORT => Some(DeviceType::_9P),
+        0x6968 | 0x6969 => Some(DeviceType::GPU),
         id if id >= PCI_DEVICE_ID_OFFSET => DeviceType::try_from(id - PCI_DEVICE_ID_OFFSET).ok(),
         _ => None,
     }
@@ -95,6 +103,8 @@ pub struct PciTransport {
     isr_status: UniqueMmioPointer<'static, ReadOnly<u8>>,
     /// The VirtIO device-specific configuration within some BAR.
     config_space: Option<UniqueMmioPointer<'static, [u32]>>,
+    /// The VirtIO shmem capability for GPU
+    shmem_gpu_cfg: Option<VirtioCapabilityInfo>,
 }
 
 impl PciTransport {
@@ -102,7 +112,7 @@ impl PciTransport {
     /// root controller.
     ///
     /// The PCI device must already have had its BARs allocated.
-    pub fn new<H: Hal, C: ConfigurationAccess>(
+    pub fn new<C: ConfigurationAccess + Hal>(
         root: &mut PciRoot<C>,
         device_function: DeviceFunction,
     ) -> Result<Self, VirtioPciError> {
@@ -121,6 +131,8 @@ impl PciTransport {
         let mut notify_off_multiplier = 0;
         let mut isr_cfg = None;
         let mut device_cfg = None;
+        let mut shmem_gpu_cfg = None;
+
         for capability in root.capabilities(device_function) {
             if capability.id != PCI_CAP_ID_VNDR {
                 continue;
@@ -130,17 +142,20 @@ impl PciTransport {
             if cap_len < 16 {
                 continue;
             }
-            let struct_info = VirtioCapabilityInfo {
-                bar: root
-                    .configuration_access
-                    .read_word(device_function, capability.offset + CAP_BAR_OFFSET)
-                    as u8,
+
+            let word = root
+                .configuration_access
+                .read_word(device_function, capability.offset + CAP_BAR_OFFSET);
+
+            let mut struct_info = VirtioCapabilityInfo {
+                bar: word as u8,
+                id: (word >> 8) as u8,
                 offset: root
                     .configuration_access
-                    .read_word(device_function, capability.offset + CAP_BAR_OFFSET_OFFSET),
+                    .read_word(device_function, capability.offset + CAP_BAR_OFFSET_OFFSET) as u64,
                 length: root
                     .configuration_access
-                    .read_word(device_function, capability.offset + CAP_LENGTH_OFFSET),
+                    .read_word(device_function, capability.offset + CAP_LENGTH_OFFSET) as u64,
             };
 
             match cfg_type {
@@ -160,11 +175,28 @@ impl PciTransport {
                 VIRTIO_PCI_CAP_DEVICE_CFG if device_cfg.is_none() => {
                     device_cfg = Some(struct_info);
                 }
+                VIRTIO_PCI_CAP_SHARED_MEMORY_CFG if
+                    device_type == DeviceType::GPU &&
+                    struct_info.id == VIRTIO_GPU_SHM_ID_HOST_VISIBLE &&
+                    shmem_gpu_cfg.is_none()
+                => {
+                    let offset_hi = root
+                        .configuration_access
+                        .read_word(device_function, capability.offset + CAP_BAR_OFFSET_HI_OFFSET) as u64;
+                    let length_hi = root
+                        .configuration_access
+                        .read_word(device_function, capability.offset + CAP_BAR_LENGTH_HI_OFFSET) as u64;
+
+                    struct_info.offset |= offset_hi << 32;
+                    struct_info.length |= length_hi << 32;
+
+                    shmem_gpu_cfg = Some(struct_info);
+                }
                 _ => {}
             }
         }
 
-        let common_cfg = get_bar_region::<H, _, _>(
+        let common_cfg = get_bar_region::<_, _>(
             root,
             device_function,
             &common_cfg.ok_or(VirtioPciError::MissingCommonConfig)?,
@@ -179,12 +211,12 @@ impl PciTransport {
                 notify_off_multiplier,
             ));
         }
-        let notify_region = get_bar_region_slice::<H, _, _>(root, device_function, &notify_cfg)?;
+        let notify_region = get_bar_region_slice::<_, _>(root, device_function, &notify_cfg)?;
         // SAFETY: `get_bar_region` should always return a valid MMIO region, assuming the PCI root
         // is behaving.
         let notify_region = unsafe { UniqueMmioPointer::new(notify_region) };
 
-        let isr_status = get_bar_region::<H, _, _>(
+        let isr_status = get_bar_region::<_, _>(
             root,
             device_function,
             &isr_cfg.ok_or(VirtioPciError::MissingIsrConfig)?,
@@ -197,7 +229,7 @@ impl PciTransport {
             // SAFETY: `get_bar_region_slice` should always return a valid MMIO region, assuming the
             // PCI root is behaving.
             Some(unsafe {
-                UniqueMmioPointer::new(get_bar_region_slice::<H, _, _>(
+                UniqueMmioPointer::new(get_bar_region_slice::<_, _>(
                     root,
                     device_function,
                     &device_cfg,
@@ -215,7 +247,12 @@ impl PciTransport {
             notify_off_multiplier,
             isr_status,
             config_space,
+            shmem_gpu_cfg
         })
+    }
+
+    pub fn shmem(&self) -> Option<VirtioCapabilityInfo> {
+        self.shmem_gpu_cfg.clone()
     }
 }
 
@@ -407,16 +444,18 @@ pub(crate) struct CommonCfg {
 
 /// Information about a VirtIO structure within some BAR, as provided by a `virtio_pci_cap`.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct VirtioCapabilityInfo {
+pub struct VirtioCapabilityInfo {
     /// The bar in which the structure can be found.
     pub bar: u8,
+    /// The ID if where are multiple capabilities of the same type
+    pub id: u8,
     /// The offset within the bar.
-    pub offset: u32,
+    pub offset: u64,
     /// The length in bytes of the structure within the bar.
-    pub length: u32,
+    pub length: u64,
 }
 
-fn get_bar_region<H: Hal, T, C: ConfigurationAccess>(
+fn get_bar_region<T, C: ConfigurationAccess + Hal>(
     root: &mut PciRoot<C>,
     device_function: DeviceFunction,
     struct_info: &VirtioCapabilityInfo,
@@ -437,7 +476,7 @@ fn get_bar_region<H: Hal, T, C: ConfigurationAccess>(
     }
     let paddr = bar_address as PhysAddr + struct_info.offset as PhysAddr;
     // SAFETY: The paddr and size describe a valid MMIO region, at least according to the PCI bus.
-    let vaddr = unsafe { H::mmio_phys_to_virt(paddr, struct_info.length as usize) };
+    let vaddr = unsafe { root.configuration_access.mmio_phys_to_virt(paddr, struct_info.length as usize) };
     if !(vaddr.as_ptr() as usize).is_multiple_of(align_of::<T>()) {
         return Err(VirtioPciError::Misaligned {
             address: vaddr.as_ptr() as usize,
@@ -447,12 +486,12 @@ fn get_bar_region<H: Hal, T, C: ConfigurationAccess>(
     Ok(vaddr.cast())
 }
 
-fn get_bar_region_slice<H: Hal, T, C: ConfigurationAccess>(
+fn get_bar_region_slice<T, C: ConfigurationAccess + Hal>(
     root: &mut PciRoot<C>,
     device_function: DeviceFunction,
     struct_info: &VirtioCapabilityInfo,
 ) -> Result<NonNull<[T]>, VirtioPciError> {
-    let ptr = get_bar_region::<H, T, C>(root, device_function, struct_info)?;
+    let ptr = get_bar_region::<T, C>(root, device_function, struct_info)?;
     Ok(NonNull::slice_from_raw_parts(
         ptr,
         struct_info.length as usize / size_of::<T>(),

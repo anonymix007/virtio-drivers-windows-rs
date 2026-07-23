@@ -78,17 +78,21 @@ impl HypPciTransport {
             if cap_len < 16 {
                 continue;
             }
+            let word = root
+                .configuration_access
+                .read_word(device_function, capability.offset + CAP_BAR_OFFSET);
+
             let struct_info = VirtioCapabilityInfo {
-                bar: root
-                    .configuration_access
-                    .read_word(device_function, capability.offset + CAP_BAR_OFFSET)
-                    as u8,
+                bar: word as u8,
+                id: (word >> 8) as u8,
                 offset: root
                     .configuration_access
-                    .read_word(device_function, capability.offset + CAP_BAR_OFFSET_OFFSET),
+                    .read_word(device_function, capability.offset + CAP_BAR_OFFSET_OFFSET)
+                    as u64,
                 length: root
                     .configuration_access
-                    .read_word(device_function, capability.offset + CAP_LENGTH_OFFSET),
+                    .read_word(device_function, capability.offset + CAP_LENGTH_OFFSET)
+                    as u64,
             };
 
             match cfg_type {
