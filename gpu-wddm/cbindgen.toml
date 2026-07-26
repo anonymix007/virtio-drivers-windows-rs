@@ -1,0 +1,33 @@
+language = "C"
+include_version = false
+sys_includes = ["stdint.h", "d3dkmthk.h"]
+no_includes = true
+include_guard = "__VIRTIO_WDDM_UAPI_H__"
+usize_is_size_t = true
+tab_width = 4
+style = "type"
+
+[layout]
+packed = "__attribute__((packed))"
+
+[macro_expansion]
+bitflags = true
+
+[export]
+include=["AdapterInfo", "CreateAllocation", "CreateResource", "Escape", "CommandHeader", "CommandMapBlob", "CommandTransfer", "SubmitCommand"]
+prefix = "VIRTIO_WDDM_"
+renaming_overrides_prefixing = true
+
+[export.rename]
+D3DKMT_HANDLE="D3DKMT_HANDLE"
+HANDLE="HANDLE"
+Pointer64_u8="VIRTIO_WDDM_Pointer64"
+Slice64_u8="VIRTIO_WDDM_Slice64"
+Pointer64_D3DKMT_HANDLE="VIRTIO_WDDM_HandlePointer64"
+Slice64_D3DKMT_HANDLE="VIRTIO_WDDM_HandleSlice64"
+
+[enum]
+rename_variants = "QualifiedScreamingSnakeCase"
+
+[struct]
+rename_associated_constant = "QualifiedScreamingSnakeCase"

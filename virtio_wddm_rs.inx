@@ -1,0 +1,108 @@
+;
+; Copyright (C) 2026 anonymix007
+;
+; virtio_wddm_rs.inf
+;
+
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%ManufacturerName%
+DriverVer=%%BUILDDATE%%, 20.15.00001.00001
+CatalogFile=virtio_wddm_rs.cat
+PnpLockdown=1
+
+[DestinationDirs]
+VirtioGpu_Files.Driver = 13   ; drivers
+VirtioGpu_Files.Usermode = 13 ; DriverStore
+
+[SourceDisksNames]
+1 = %DiskId1%,,,""
+
+[SourceDisksFiles]
+virtio_wddm_rs.sys = 1,,
+dx10um_virtio.dll = 1,,
+vulkan_virtio.dll = 1,,
+virtio_icd.x86_64.json = 1,,
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64.10.0...16299
+
+[Standard.NTamd64.10.0...16299]
+%VirtioGpu.DeviceDesc% = VirtioGpu_Inst, PCI\VEN_1AF4&DEV_1050&SUBSYS_11001AF4&REV_01
+;%VirtioGpu.DeviceDesc% = VirtioGpu_Inst, PCI\VEN_1AF4&DEV_6969&SUBSYS_11001AF4&REV_01
+
+[VirtioGpu_Files.Driver]
+virtio_wddm_rs.sys,,,2
+
+[VirtioGpu_Files.Usermode]
+dx11um_virtio.dll,,,0
+vulkan_virtio.dll,,,0
+virtio_icd.x86_64.json,,,0
+
+[VirtioGpu_Inst]
+Include=msdv.inf
+FeatureScore=F9
+CopyFiles=VirtioGpu_Files.Driver, VirtioGpu_Files.Usermode
+AddReg=VirtioGpu_DeviceSettings
+
+[VirtioGpu_Inst.Services]
+AddService = VirtioGpu,0x00000002,VirtioGpu_Service_Inst, VirtioGpu_EventLog_Inst
+
+[VirtioGpu_Inst.HW]
+AddReg = VirtioGpu_PCI_MSIX
+
+[VirtioGpu_Service_Inst]
+ServiceType = %SERVICE_KERNEL_DRIVER%
+StartType = %SERVICE_DEMAND_START%
+ErrorControl = %SERVICE_ERROR_IGNORE%
+ServiceBinary = %13%\virtio_wddm_rs.sys
+
+[VirtioGpu_EventLog_Inst]
+AddReg = VirtioGpu_EventLog_Inst.AddReg
+
+[VirtioGpu_EventLog_Inst.AddReg]
+HKR,,EventMessageFile,%REG_EXPAND_SZ%,"%%SystemRoot%%\System32\IoLogMsg.dll"
+HKR,,TypesSupported,%REG_DWORD%,7
+
+[VirtioGpu_DeviceSettings]
+HKR,, UserModeDriverName,          %REG_MULTI_SZ%, %13%\dx10um_virtio.dll,%13%\dx10um_virtio.dll,%13%\dx10um_virtio.dll,%13%\dx10um_virtio.dll
+HKR,, VulkanDriverName,            %REG_SZ%,       %13%\virtio_icd.x86_64.json
+
+;HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Scheduler",EnablePreemption,%REG_DWORD%,0
+;HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers",TdrDebugMode,%REG_DWORD%,1
+
+[VirtioGpu_PCI_MSIX]
+HKR, "Interrupt Management",, 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties",, 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MSISupported, 0x00010001, 0
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", MessageNumberLimit, 0x00010001, 4
+;HKR, "Interrupt Management\Affinity Policy",, 0x00000010
+;HKR, "Interrupt Management\Affinity Policy", DevicePolicy, 0x00010001, 5
+;HKR, "Interrupt Management\Affinity Policy", DevicePriority, 0x00010001, 3
+
+[Strings]
+
+;  *******Localizable Strings*******
+diskId1 = "VirtIO GPU controller Installation Disk"
+VirtioGpu.DeviceDesc = "VirtIO GPU 3D controller"
+ManufacturerName = "anonymix007"
+
+;  *******Non Localizable Strings*******
+SERVICE_BOOT_START = 0x0
+SERVICE_SYSTEM_START = 0x1
+SERVICE_AUTO_START = 0x2
+SERVICE_DEMAND_START = 0x3
+SERVICE_DISABLED = 0x4
+
+SERVICE_KERNEL_DRIVER = 0x1
+SERVICE_ERROR_IGNORE = 0x0
+SERVICE_ERROR_NORMAL = 0x1
+SERVICE_ERROR_SEVERE = 0x2
+SERVICE_ERROR_CRITICAL = 0x3
+
+REG_SZ        = 0x00000000
+REG_MULTI_SZ  = 0x00010000
+REG_EXPAND_SZ = 0x00020000
+REG_DWORD     = 0x00010001

@@ -2,7 +2,7 @@ cargo-features = ["trim-paths"]
 
 [workspace]
 resolver = "3"
-members = ["wdk"]
+members = ["gpu-wddm", "wdk"]
 
 [workspace.package]
 edition = "2024"

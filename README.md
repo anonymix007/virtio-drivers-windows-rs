@@ -1,6 +1,7 @@
 # Windows VirtIO drivers
 
-This repository contains different VirtIO kernel drivers for Windows.
+This repository contains different VirtIO kernel drivers for Windows, currently only one is available with more drivers yet to come:
+- VirtIO-GPU full (render + display) WDDM 2.0 driver
 
 ## License
 
