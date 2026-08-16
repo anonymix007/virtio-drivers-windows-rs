@@ -4,7 +4,7 @@ This repository contains different VirtIO kernel drivers for Windows, currently 
 - VirtIO-GPU full (render + display) WDDM 2.0 driver
 
 ## Quick start
-- Download (EWDK)[https://learn.microsoft.com/en-us/legal/windows/hardware/enterprise-wdk-license-2026] and mount the ISO somewhere.
+- Download [EWDK](https://learn.microsoft.com/en-us/legal/windows/hardware/enterprise-wdk-license-2026) and mount the ISO somewhere.
 - Create an environment file (`ewdk.env`) pointing to the EWDK dirs and versions:
 ```
 #!/bin/bash
@@ -16,7 +16,7 @@ export WINSDKVER="10.0.26100.0"
 export WINSDKDIR="$EWDK_ROOT/Program Files/Windows Kits/10"
 export VFSOVERLAY="$HOME/projects/virtio-win32/vfs-overlay.json"
 ```
-vfs-overlay.json is generated using generate_vfs.py script from (https://github.com/tmp64/clang-cl-linux/)[https://github.com/tmp64/clang-cl-linux/], see the how-to there.
+vfs-overlay.json is generated using generate_vfs.py script from [https://github.com/tmp64/clang-cl-linux/](https://github.com/tmp64/clang-cl-linux/), see the how-to there.
 - Build Mesa and copy dlls to target/mesa
 - Generate private and public signing keys and create an environment (`cert.env`) file with the paths:
 ```
