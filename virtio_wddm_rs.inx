@@ -22,7 +22,7 @@ VirtioGpu_Files.Usermode = 13 ; DriverStore
 
 [SourceDisksFiles]
 virtio_wddm_rs.sys = 1,,
-dx10um_virtio.dll = 1,,
+dx11um_virtio.dll = 1,,
 vulkan_virtio.dll = 1,,
 virtio_icd.x86_64.json = 1,,
 
@@ -37,7 +37,7 @@ virtio_icd.x86_64.json = 1,,
 virtio_wddm_rs.sys,,,2
 
 [VirtioGpu_Files.Usermode]
-dx10um_virtio.dll,,,0
+dx11um_virtio.dll,,,0
 vulkan_virtio.dll,,,0
 virtio_icd.x86_64.json,,,0
 
@@ -67,7 +67,7 @@ HKR,,EventMessageFile,%REG_EXPAND_SZ%,"%%SystemRoot%%\System32\IoLogMsg.dll"
 HKR,,TypesSupported,%REG_DWORD%,7
 
 [VirtioGpu_DeviceSettings]
-HKR,, UserModeDriverName,          %REG_MULTI_SZ%, %13%\dx10um_virtio.dll,%13%\dx10um_virtio.dll,%13%\dx10um_virtio.dll,%13%\dx10um_virtio.dll
+HKR,, UserModeDriverName,          %REG_MULTI_SZ%, %13%\dx11um_virtio.dll,%13%\dx11um_virtio.dll,%13%\dx11um_virtio.dll,%13%\dx11um_virtio.dll
 HKR,, VulkanDriverName,            %REG_SZ%,       %13%\virtio_icd.x86_64.json
 
 ;HKLM,"SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Scheduler",EnablePreemption,%REG_DWORD%,0

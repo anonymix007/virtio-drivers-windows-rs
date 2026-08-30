@@ -1,7 +1,7 @@
 # Windows VirtIO drivers
 
 This repository contains different VirtIO kernel drivers for Windows, currently only one is available with more drivers yet to come:
-- VirtIO-GPU full (render + display) WDDM 2.0 driver
+- VirtIO-GPU full (render + display) WDDM 2.0 kernel-mode driver (corresponding [UMD](https://github.com/anonymix007/virtio-d3d11))
 
 ## Quick start
 - Download [EWDK](https://learn.microsoft.com/en-us/legal/windows/hardware/enterprise-wdk-license-2026) and mount the ISO somewhere.
