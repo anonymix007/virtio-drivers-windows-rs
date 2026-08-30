@@ -1419,6 +1419,10 @@ impl EngineState {
 
         let (now, freq) = ke_query_performance_counter();
 
+        if (now - last_submitted_timestamp) > EngineState::RESPONSIVE_TIMEOUT_SEC * freq {
+            warn!("{}: not responsive: {:?}, now {}, last submitted {}, threshold {}", function!(), self, now, last_submitted_timestamp, EngineState::RESPONSIVE_TIMEOUT_SEC * freq);
+        }
+
         /*now - last_completed_timestamp <= EngineState::RESPONSIVE_TIMEOUT_SEC * freq ||*/ (now - last_submitted_timestamp) <= EngineState::RESPONSIVE_TIMEOUT_SEC * freq
     }
 }
@@ -1608,6 +1612,8 @@ impl GpuData {
     }
 
     fn handle_fence_submissions(&self) {
+        let mut resubmit = SmallVec::<[FenceSubmission; 8]>::new();
+
         self.fence_submissions.lock().retain(|fence| {
             //warn!("{}: engine {:?}, dxgk_fence {}, virtio_fence {}", function!(), *engine, *dxgk_fence, *virtio_fence);
             if fence.is_ready(&self.fence) {
@@ -1618,17 +1624,26 @@ impl GpuData {
             } else if fence.is_timeout() {
                 warn!("{}: fence timed out: {:?}", function!(), fence);
                 warn!("{}: engine state: {:?}", function!(), self.engines[fence.engine.node_ordinal() as usize]);
-                // TODO: DXGK_INTERRUPT_DMA_PAGE_FAULTED does not seem to unblock VidSch from waiting
-                // We want something that would both unblock it and crash the userspace caller
-                // But misrendering is probably better than hang
-                self.notify_dma_completed(fence.engine, fence.dxgk_fence);
-                //self.notify_dma_faulted(fence.engine, fence.dxgk_fence);
-                false
+                // DEBUG: it's better to misrender rather than hang forever
+                if false {
+                    // TODO: DXGK_INTERRUPT_DMA_PAGE_FAULTED does not seem to unblock VidSch from waiting
+                    // We want something that would both unblock it and crash the userspace caller
+                    // But misrendering is probably better than hang
+                    self.notify_dma_completed(fence.engine, fence.dxgk_fence);
+                    //self.notify_dma_faulted(fence.engine, fence.dxgk_fence);
+                    false
+                } else {
+                    resubmit.push(FenceSubmission::new(fence.engine, fence.dxgk_fence, fence.virtio_fence));
+                    false
+                }
             } else {
                 true
             }
         });
 
+        self.fence_submissions.lock().extend(resubmit);
+
+        /*
         if self.fence_submissions.lock().len() > 0 || self.fence.unsignaled.read().len() > 0 {
             for (i, state) in self.engines.iter().enumerate() {
                 let engine = Engine::try_from_node_ordinal(i as _).unwrap();
@@ -1638,6 +1653,7 @@ impl GpuData {
                 }
             }
         }
+        */
 
         //let pending = self.fence_submissions.lock();
         //let unsignaled = &self.fence.0.read().unsignaled;

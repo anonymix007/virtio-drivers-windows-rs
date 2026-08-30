@@ -1106,17 +1106,16 @@ impl Allocation {
     }
 
     pub fn query_layout(self: &Arc<Allocation>, device: Arc<Device>) -> Result<Option<VirglResourceLayout>, NtStatus> {
-        if !self.is_3d() {
-            error!("{}: cannot query layout for blob resource: {:?}", function!(), self);
-            return Err(NtStatus(STATUS::INVALID_PARAMETER));
-        }
         match &self.resource {
             VirtioResource::_3D { layout, .. } => {
                 if let Some(layout) = *layout.read() {
                     return Ok(Some(layout))
                 }
             }
-            _ => unreachable!(),
+            _ => {
+                error!("{}: cannot query layout for blob resource: {:?}", function!(), self);
+                return Err(NtStatus(STATUS::INVALID_PARAMETER));
+            }
         }
 
         match device.query_layout(&self) {

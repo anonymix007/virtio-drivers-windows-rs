@@ -189,7 +189,7 @@ impl Device {
         let context = Context3D::try_new(self.chan.clone(), params.capset_id, params.debug_name())?;
         self.main_context.write().replace(context);
 
-        if matches!(params.capset_id, CapsetId::Venus) {
+        if matches!(params.capset_id, CapsetId::Venus | CapsetId::Drm) {
             let capset_id = if supported_capsets.contains(CapsetMask::VIRGL2) {
                 CapsetId::Virgl2
             } else {
@@ -274,6 +274,8 @@ impl Device {
     }
 
     pub fn present(&self, present: &mut DXGKARG_PRESENT) -> Result<(), NtStatus> {
+        trace!("{}: device: {:?}, flags: {:?}", function!(), self, present.Flags);
+
         let allocations = unsafe {
             slice_from_raw_parts(present.__bindgen_anon_1.pAllocationList, (DXGK_PRESENT_MAX_INDEX + 1) as usize)
         };
@@ -312,9 +314,8 @@ impl Device {
             return Err(NtStatus(STATUS::INVALID_HANDLE));
         };
 
-        debug!("{}: flags: {:?}", function!(), present.Flags);
-        debug!("{}: src: {:?}", function!(), src_alloc);
-        debug!("{}: dst: {:?}", function!(), dst_alloc);
+        trace!("{}: src: {:?}", function!(), src_alloc);
+        trace!("{}: dst: {:?}", function!(), dst_alloc);
 
         let patchloc_out = slice_from_raw_parts_mut(present.pPatchLocationListOut, present.PatchLocationListOutSize as _);
 
