@@ -42,7 +42,9 @@ mkdir -p $MESA
 cbindgen --config $DIR/gpu-wddm/cbindgen.toml $DIR/gpu-wddm/src/uapi.rs > $MESA/virtio_wddm_uapi.h 2>/dev/null
 cbindgen --config $DIR/gpu-wddm/cbindgen.toml $DIR/gpu-wddm/src/uapi.rs --lang C++ > $MESA/virtio_wddm_uapi.hpp 2>/dev/null
 
-touch $DIR/gpu-wddm/build.rs
+if [ "$1" != "--no-force-rebuild" ]; then
+  touch $DIR/gpu-wddm/build.rs
+fi
 cargo build $CARGO_FLAVOR --package virtio-gpu-wddm-rs
 
 . $DIR/ewdk.env
@@ -53,9 +55,17 @@ rm -rf $DIST
 mkdir -p $DIST
 sed "s#%%BUILDDATE%%#${BUILDDATE}#" $DIR/$NAME.inx > $DIST/$NAME.inf
 cp $MESA/{*.json,*.dll} $DIST/
-cp $DRIVER.pdb $DIST/
+
+for icd in $DIST/vulkan_*.dll; do
+  symbols=${icd%.*}.debug
+  $ARCH-w64-mingw32-objcopy --only-keep-debug $icd $symbols
+  $ARCH-w64-mingw32-strip --strip-debug --strip-unneeded $icd
+  $ARCH-w64-mingw32-objcopy --add-gnu-debuglink=$symbols $icd
+done
 
 osslsigncode sign -key $KEY -certs $CERT $DRIVER.dll $DIST/$NAME.sys
 makecat --os-attr "2:10.0" --os "$WINVER" --hwid "$HWID" --output $DIST/$NAME.cat-unsigned $DIST/*
 osslsigncode sign -key $KEY -certs $CERT $DIST/$NAME.cat-unsigned $DIST/$NAME.cat
 rm $DIST/$NAME.cat-unsigned
+cp $DRIVER.pdb $DIST/
+cp $MESA/*.debug $DIST/
