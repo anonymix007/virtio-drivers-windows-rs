@@ -37,7 +37,7 @@ virtio_icd.x86_64.json = 1,,
 virtio_wddm_rs.sys,,,2
 
 [VirtioGpu_Files.Usermode]
-dx11um_virtio.dll,,,0
+dx10um_virtio.dll,,,0
 vulkan_virtio.dll,,,0
 virtio_icd.x86_64.json,,,0
 
