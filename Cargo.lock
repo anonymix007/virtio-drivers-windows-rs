@@ -27,12 +27,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomicbox"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a9a3820bc9e9aaf60c8389c2a4808548599f4ff254ce6bdb608ac3631d4ad76"
-
-[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -703,11 +697,9 @@ dependencies = [
 name = "virtio-gpu-wddm-rs"
 version = "0.1.0"
 dependencies = [
- "atomicbox",
  "bitflags 2.12.1",
  "chrono",
  "crossbeam",
- "ewdk",
  "hashbrown",
  "ida-rs",
  "itertools 0.15.0",

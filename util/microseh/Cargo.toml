@@ -5,9 +5,7 @@ authors = ["sonodima"]
 edition = "2021"
 
 description = "Structured Exception Handling (SEH) for Rust"
-homepage = "https://github.com/sonodima/microseh"
 repository = "https://github.com/sonodima/microseh"
-readme = "README.md"
 license = "MIT"
 
 keywords = ["seh", "windows", "hardware", "exception", "handler"]
