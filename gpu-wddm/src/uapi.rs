@@ -974,9 +974,9 @@ pub struct Box3D {
     pub depth: u32,
 }
 
-impl Into<virtio_drivers::device::gpu::commands::Box> for Box3D {
-    fn into(self) -> virtio_drivers::device::gpu::commands::Box {
-        virtio_drivers::device::gpu::commands::Box {
+impl Into<virtio_drivers::device::gpu::GpuBox> for Box3D {
+    fn into(self) -> virtio_drivers::device::gpu::GpuBox {
+        virtio_drivers::device::gpu::GpuBox {
             x: self.x,
             y: self.y,
             z: self.z,

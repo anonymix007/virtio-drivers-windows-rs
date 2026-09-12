@@ -62,9 +62,7 @@ use wdk::{
 };
 use virtio_drivers::{
     config::*,
-    device::{
-        gpu::*,
-    },
+    device::gpu,
     transport::{
         pci::{
             PciTransport,
@@ -362,14 +360,14 @@ macro_rules! check_state_mut {
     }}
 }
 
-const SUPPORTED_FEATURES: Features = Features::RING_EVENT_IDX
-    .union(Features::RING_INDIRECT_DESC)
-    .union(Features::VERSION_1)
-    .union(Features::ACCESS_PLATFORM)
-    .union(Features::EDID)
-    .union(Features::VIRGL)
-    .union(Features::RESOURCE_BLOB)
-    .union(Features::CONTEXT_INIT);
+const SUPPORTED_FEATURES: gpu::Features = gpu::Features::RING_EVENT_IDX
+    .union(gpu::Features::RING_INDIRECT_DESC)
+    .union(gpu::Features::VERSION_1)
+    .union(gpu::Features::ACCESS_PLATFORM)
+    .union(gpu::Features::EDID)
+    .union(gpu::Features::VIRGL)
+    .union(gpu::Features::RESOURCE_BLOB)
+    .union(gpu::Features::CONTEXT_INIT);
 
 //#[derive(Clone)]
 pub struct DxgkInterface {
@@ -875,7 +873,7 @@ impl ConfigurationAccess for DxgkInterface {
 }
 
 struct AdapterState {
-    negotiated_features: Features,
+    negotiated_features: gpu::Features,
     luid: u64,
     num_scanouts: u8,
     is_vga: bool,
@@ -1173,9 +1171,9 @@ impl Adapter {
 
         let negotiated_features = pci_transport.begin_init(SUPPORTED_FEATURES);
 
-        let events_read = map_virtio_error!(read_config!(pci_transport, Config, events_read))?;
-        let num_scanouts = map_virtio_error!(read_config!(pci_transport, Config, num_scanouts))? as u8;
-        let num_capsets = map_virtio_error!(read_config!(pci_transport, Config, num_capsets))?;
+        let events_read = map_virtio_error!(read_config!(pci_transport, gpu::Config, events_read))?;
+        let num_scanouts = map_virtio_error!(read_config!(pci_transport, gpu::Config, num_scanouts))? as u8;
+        let num_capsets = map_virtio_error!(read_config!(pci_transport, gpu::Config, num_capsets))?;
         //info!("events_read: {}, num_scanouts: {}, num_capsets: {}", events_read, num_scanouts, num_capsets);
 
         //info!("negotiated features: {:?}", negotiated_features);
@@ -1214,7 +1212,7 @@ impl Adapter {
 
         let display_modes = chan.get_display_info()?;
 
-        let mut rects = [commands::Rect { width: 0, height: 0, x: 0, y: 0}; 16];
+        let mut rects = [gpu::Rect { width: 0, height: 0, x: 0, y: 0}; 16];
         let mut flipq = [const { None }; 16];
         let addrs = [const { AtomicU64::new(0) }; 16];
         let vsync_enabled = AtomicBool::new(false);
@@ -1295,9 +1293,9 @@ impl Adapter {
                 umd_priv.tag = AdapterInfo::TAG;
                 umd_priv.luid = state.luid;
                 umd_priv.capset_mask = state.supported_capsets;
-                umd_priv.supports_3d = state.negotiated_features.contains(Features::VIRGL) &&
-                                       state.negotiated_features.contains(Features::RESOURCE_BLOB) &&
-                                       state.negotiated_features.contains(Features::CONTEXT_INIT);
+                umd_priv.supports_3d = state.negotiated_features.contains(gpu::Features::VIRGL) &&
+                                       state.negotiated_features.contains(gpu::Features::RESOURCE_BLOB) &&
+                                       state.negotiated_features.contains(gpu::Features::CONTEXT_INIT);
                 umd_priv.has_shmem = true;
 
                 Ok(())
@@ -1712,13 +1710,13 @@ impl Adapter {
                     let phys = state.queue_handler.get_shmem_slice().0 + offset;
 
                     let caching_type = match map_info {
-                        commands::VIRTIO_GPU_MAP_CACHE_NONE => {
+                        gpu::VIRTIO_GPU_MAP_CACHE_NONE => {
                             warn!("{}: map blob returned unexpected caching type VIRTIO_GPU_MAP_CACHE_NONE for {:?}", function!(), &alloc);
                             MEMORY_CACHING_TYPE::MmNonCached
                         },
-                        commands::VIRTIO_GPU_MAP_CACHE_CACHED => MEMORY_CACHING_TYPE::MmCached,
-                        commands::VIRTIO_GPU_MAP_CACHE_UNCACHED => MEMORY_CACHING_TYPE::MmNonCached,
-                        commands::VIRTIO_GPU_MAP_CACHE_WC => MEMORY_CACHING_TYPE::MmWriteCombined,
+                        gpu::VIRTIO_GPU_MAP_CACHE_CACHED => MEMORY_CACHING_TYPE::MmCached,
+                        gpu::VIRTIO_GPU_MAP_CACHE_UNCACHED => MEMORY_CACHING_TYPE::MmNonCached,
+                        gpu::VIRTIO_GPU_MAP_CACHE_WC => MEMORY_CACHING_TYPE::MmWriteCombined,
                         _ => {
                             error!("{}: map blob returned unkown caching type 0x{:x} for {:?}", function!(), map_info, &alloc);
                             return Err(NtStatus(STATUS::IO_DEVICE_ERROR));
@@ -2286,8 +2284,8 @@ impl Adapter {
                     return Err(NtStatus(STATUS::INVALID_PARAMETER));
                 };
 
-                let mut v = Vec::<u8, _>::try_with_capacity_in(size_of::<commands::CmdSubmit3d>() + data.len(), AlignedAlloc::<PAGE_SIZE>)?;
-                v.resize(size_of::<commands::CmdSubmit3d>(), 0);
+                let mut v = Vec::<u8, _>::try_with_capacity_in(size_of::<gpu::CmdSubmit3D>() + data.len(), AlignedAlloc::<PAGE_SIZE>)?;
+                v.resize(size_of::<gpu::CmdSubmit3D>(), 0);
                 v.extend_from_slice(data);
 
                 Some(v.into_boxed_slice())
@@ -2331,8 +2329,8 @@ impl Adapter {
 
                     debug!("{}: header: {:?}", function!(), hdr);
 
-                    let mut v = Vec::<u8, _>::try_with_capacity_in(size_of::<commands::CmdSubmit3d>() + data.len(), AlignedAlloc::<PAGE_SIZE>)?;
-                    v.resize(size_of::<commands::CmdSubmit3d>(), 0);
+                    let mut v = Vec::<u8, _>::try_with_capacity_in(size_of::<gpu::CmdSubmit3D>() + data.len(), AlignedAlloc::<PAGE_SIZE>)?;
+                    v.resize(size_of::<gpu::CmdSubmit3D>(), 0);
                     v.extend_from_slice(data);
 
                     Ok(v.into_boxed_slice())

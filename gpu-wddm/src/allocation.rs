@@ -48,7 +48,7 @@ use wdk::{
     },
 };
 
-use virtio_drivers::device::gpu::commands::MemEntry;
+use virtio_drivers::device::gpu::MemEntry;
 
 use crate::adapter::*;
 use crate::device::*;
@@ -1037,7 +1037,7 @@ impl Allocation {
                     MemEntry {
                         addr,
                         length,
-                        _padding: 0,
+                        padding: 0,
                     }
                 }).coalesce(|previous, current| {
                     if let Some(new_length) = merge_entries(&previous, &current) {
@@ -1082,7 +1082,7 @@ impl Allocation {
                         let entry = MemEntry {
                             addr,
                             length,
-                            _padding: 0,
+                            padding: 0,
                         };
 
                         if let Some(previous) = map.1.last_mut() && let Some(new_length) = merge_entries(previous, &entry) {

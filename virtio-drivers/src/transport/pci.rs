@@ -8,9 +8,9 @@ use self::bus::{
 use super::{DeviceStatus, DeviceType, Transport};
 use crate::{
     Error,
+    device::gpu::VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
     hal::{Hal, PhysAddr},
     transport::InterruptStatus,
-    device::gpu::VIRTIO_GPU_SHM_ID_HOST_VISIBLE,
 };
 use core::{
     mem::{align_of, size_of},
@@ -70,7 +70,6 @@ pub(crate) fn device_type(pci_device_id: u16) -> Option<DeviceType> {
         TRANSITIONAL_SCSI_HOST => Some(DeviceType::ScsiHost),
         TRANSITIONAL_ENTROPY_SOURCE => Some(DeviceType::EntropySource),
         TRANSITIONAL_9P_TRANSPORT => Some(DeviceType::_9P),
-        0x6968 | 0x6969 => Some(DeviceType::GPU),
         id if id >= PCI_DEVICE_ID_OFFSET => DeviceType::try_from(id - PCI_DEVICE_ID_OFFSET).ok(),
         _ => None,
     }
@@ -152,10 +151,12 @@ impl PciTransport {
                 id: (word >> 8) as u8,
                 offset: root
                     .configuration_access
-                    .read_word(device_function, capability.offset + CAP_BAR_OFFSET_OFFSET) as u64,
+                    .read_word(device_function, capability.offset + CAP_BAR_OFFSET_OFFSET)
+                    as u64,
                 length: root
                     .configuration_access
-                    .read_word(device_function, capability.offset + CAP_LENGTH_OFFSET) as u64,
+                    .read_word(device_function, capability.offset + CAP_LENGTH_OFFSET)
+                    as u64,
             };
 
             match cfg_type {
@@ -175,17 +176,19 @@ impl PciTransport {
                 VIRTIO_PCI_CAP_DEVICE_CFG if device_cfg.is_none() => {
                     device_cfg = Some(struct_info);
                 }
-                VIRTIO_PCI_CAP_SHARED_MEMORY_CFG if
-                    device_type == DeviceType::GPU &&
-                    struct_info.id == VIRTIO_GPU_SHM_ID_HOST_VISIBLE &&
-                    shmem_gpu_cfg.is_none()
-                => {
-                    let offset_hi = root
-                        .configuration_access
-                        .read_word(device_function, capability.offset + CAP_BAR_OFFSET_HI_OFFSET) as u64;
-                    let length_hi = root
-                        .configuration_access
-                        .read_word(device_function, capability.offset + CAP_BAR_LENGTH_HI_OFFSET) as u64;
+                VIRTIO_PCI_CAP_SHARED_MEMORY_CFG
+                    if device_type == DeviceType::GPU
+                        && struct_info.id == VIRTIO_GPU_SHM_ID_HOST_VISIBLE
+                        && shmem_gpu_cfg.is_none() =>
+                {
+                    let offset_hi = root.configuration_access.read_word(
+                        device_function,
+                        capability.offset + CAP_BAR_OFFSET_HI_OFFSET,
+                    ) as u64;
+                    let length_hi = root.configuration_access.read_word(
+                        device_function,
+                        capability.offset + CAP_BAR_LENGTH_HI_OFFSET,
+                    ) as u64;
 
                     struct_info.offset |= offset_hi << 32;
                     struct_info.length |= length_hi << 32;
@@ -247,7 +250,7 @@ impl PciTransport {
             notify_off_multiplier,
             isr_status,
             config_space,
-            shmem_gpu_cfg
+            shmem_gpu_cfg,
         })
     }
 
@@ -476,7 +479,10 @@ fn get_bar_region<T, C: ConfigurationAccess + Hal>(
     }
     let paddr = bar_address as PhysAddr + struct_info.offset as PhysAddr;
     // SAFETY: The paddr and size describe a valid MMIO region, at least according to the PCI bus.
-    let vaddr = unsafe { root.configuration_access.mmio_phys_to_virt(paddr, struct_info.length as usize) };
+    let vaddr = unsafe {
+        root.configuration_access
+            .mmio_phys_to_virt(paddr, struct_info.length as usize)
+    };
     if !(vaddr.as_ptr() as usize).is_multiple_of(align_of::<T>()) {
         return Err(VirtioPciError::Misaligned {
             address: vaddr.as_ptr() as usize,

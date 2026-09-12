@@ -60,9 +60,7 @@ use crossbeam::{
 use winresult::STATUS;
 use virtio_drivers::{
     config::*,
-    device::{
-        gpu::*,
-    },
+    device::gpu,
     transport::{
         pci::{
             VirtioCapabilityInfo,
@@ -119,19 +117,19 @@ pub struct CapsetInfo {
 
 //#[derive(Debug)]
 //enum Message {
-//    Control(commands::GpuControlCommand),
-//    Cursor(commands::GpuCursorCommand),
+//    Control(gpu::GpuControlCommand),
+//    Cursor(gpu::GpuCursorCommand),
 //}
 
 const MAX_COMMAND_SIZE:  usize = 120;
 const MAX_RESPONSE_SIZE: usize = 56;
 // TODO: check control command sizes
-//const _: () = assert!(size_of::<commands::COMMAND_TYPE>() < MAX_COMMAND_SIZE);
+//const _: () = assert!(size_of::<gpu::COMMAND_TYPE>() < MAX_COMMAND_SIZE);
 
 const CURSOR_COMMAND_SIZE: usize = 56;
 const CURSOR_RESPONSE_SIZE: usize = 24;
-const _: () = assert!(size_of::<commands::UpdateCursor>() <= CURSOR_COMMAND_SIZE);
-const _: () = assert!(size_of::<commands::CtrlHeader>() <= CURSOR_RESPONSE_SIZE);
+const _: () = assert!(size_of::<gpu::UpdateCursor>() <= CURSOR_COMMAND_SIZE);
+const _: () = assert!(size_of::<gpu::CtrlHeader>() <= CURSOR_RESPONSE_SIZE);
 
 #[pin_data]
 struct BlockingBufferInner<T> {
@@ -763,16 +761,16 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         // DEBUG
         if false {
             let data = buffer.input.as_ref();
-            let hdr = commands::CtrlHeader::read_from_prefix(data).unwrap().0;
+            let hdr = gpu::CtrlHeader::read_from_prefix(data).unwrap().0;
             debug!("{}: -- starting processing command (len {}): {:?}", function!(), data.len(), hdr);
         }
 
         // DEBUG
         if false && input_is_dma {
             let data = buffer.input.as_ref();
-            let hdr = commands::CtrlHeader::read_from_prefix(data).unwrap().0;
-            if hdr.hdr_type == commands::Command::SUBMIT_3D {
-                let hdr = commands::CmdSubmit3d::read_from_prefix(data).unwrap().0;
+            let hdr = gpu::CtrlHeader::read_from_prefix(data).unwrap().0;
+            if hdr.hdr_type == gpu::Command::SUBMIT_3D {
+                let hdr = gpu::CmdSubmit3D::read_from_prefix(data).unwrap().0;
                 if hdr.size == 0 {
                     warn!("{}: timestamp {:?}", function!(), ke_query_performance_counter());
                 }
@@ -782,10 +780,10 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         // DEBUG
         if false && input_is_dma {
             let data = buffer.input.as_ref();
-            let hdr = commands::CtrlHeader::read_from_prefix(data).unwrap().0;
+            let hdr = gpu::CtrlHeader::read_from_prefix(data).unwrap().0;
             debug!("{}: -- starting decoding command (len {}): {:?}", function!(), data.len(), hdr);
 
-            /*if hdr.hdr_type == commands::Command::SUBMIT_3D {
+            /*if hdr.hdr_type == gpu::Command::SUBMIT_3D {
                 match &buffer.callback {
                     Callback::DmaCompleted(u32) => {
                         error!("no allocations!");
@@ -804,8 +802,8 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
                     },
                     _ => {},
                 }
-                let hdr = commands::CmdSubmit3d::read_from_prefix(data).unwrap().0;
-                let body = &data[size_of::<commands::CmdSubmit3d>()..];
+                let hdr = gpu::CmdSubmit3D::read_from_prefix(data).unwrap().0;
+                let body = &data[size_of::<gpu::CmdSubmit3D>()..];
 
                 let mut offset = 0;
                 let typed_data = unsafe {
@@ -827,8 +825,8 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
                     }
                     offset += 1 + len;
                 }
-            } else*/ if hdr.hdr_type == commands::Command::RESOURCE_ATTACH_BACKING {
-                let cmd = commands::ResourceAttachBacking::read_from_prefix(data).unwrap().0;
+            } else*/ if hdr.hdr_type == gpu::Command::RESOURCE_ATTACH_BACKING {
+                let cmd = gpu::ResourceAttachBacking::read_from_prefix(data).unwrap().0;
                 debug!("{}: decoded: cmd: {:?}", function!(), cmd);
             }
             debug!("{}: -- finished decoding command: {:?}", function!(), hdr);
@@ -837,9 +835,9 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         // DEBUG!!!!
         if false && let Some((Engine::Other(_), fence)) = buffer.callback.as_dma_completed() {
             let data = buffer.input.as_ref();
-            let hdr = commands::CtrlHeader::read_from_prefix(data).unwrap().0;
-            if hdr.hdr_type == commands::Command::SUBMIT_3D {
-                let body = &data[size_of::<commands::CmdSubmit3d>()..];
+            let hdr = gpu::CtrlHeader::read_from_prefix(data).unwrap().0;
+            if hdr.hdr_type == gpu::Command::SUBMIT_3D {
+                let body = &data[size_of::<gpu::CmdSubmit3D>()..];
                 let offset = 0;
                 let typed_data = unsafe {
                     core::slice::from_raw_parts(body.as_ptr() as *const u32, body.len() / size_of::<u32>())
@@ -904,34 +902,34 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         self.free.push(i).unwrap();
     }
 
-    fn read_req_header(&self, i: usize) -> commands::CtrlHeader {
+    fn read_req_header(&self, i: usize) -> gpu::CtrlHeader {
         let input = self.buffers.inputs[i].as_ref().unwrap().as_ref();
-        commands::CtrlHeader::read_from_prefix(input).unwrap().0
+        gpu::CtrlHeader::read_from_prefix(input).unwrap().0
     }
 
-    fn read_rsp_header(&self, i: usize) -> commands::CtrlHeader {
+    fn read_rsp_header(&self, i: usize) -> gpu::CtrlHeader {
         let output = self.buffers.outputs[i].as_ref().unwrap().as_ref();
-        commands::CtrlHeader::read_from_prefix(output).unwrap().0
+        gpu::CtrlHeader::read_from_prefix(output).unwrap().0
     }
 
     fn read_completed_fence(&self, i: usize) -> Option<u64> {
         let rsp = self.read_rsp_header(i);
         let req = self.read_req_header(i);
 
-        if !req.hdr_type.is_cursor() && rsp.flags & commands::GPU_FLAG_FENCE != req.flags & commands::GPU_FLAG_FENCE {
+        if !req.hdr_type.is_cursor() && rsp.flags & gpu::GPU_FLAG_FENCE != req.flags & gpu::GPU_FLAG_FENCE {
             warn!("{}: req {:?}, rsp {:?}, fence flag is different", function!(), req, rsp);
             //return None;
         }
 
-        if rsp.flags & commands::GPU_FLAG_FENCE != 0 {
+        if rsp.flags & gpu::GPU_FLAG_FENCE != 0 {
             Some(rsp.fence_id)
-        } else if req.flags & commands::GPU_FLAG_FENCE != 0 {
+        } else if req.flags & gpu::GPU_FLAG_FENCE != 0 {
             Some(req.fence_id)
         } else {
-            //if req.hdr_type == commands::Command::SUBMIT_3D {
+            //if req.hdr_type == gpu::Command::SUBMIT_3D {
             //    let input = self.buffers.inputs[i].as_ref().unwrap().as_ref();
-            //    let req = commands::CmdSubmit3d::read_from_prefix(input).unwrap().0;
-            //    if let Some((cmd, body)) = (&input[size_of::<commands::CmdSubmit3d>()..]).split_at_checked(size_of::<u32>()) {
+            //    let req = gpu::CmdSubmit3D::read_from_prefix(input).unwrap().0;
+            //    if let Some((cmd, body)) = (&input[size_of::<gpu::CmdSubmit3D>()..]).split_at_checked(size_of::<u32>()) {
             //        let cmd = crate::virgl::VenusCommandType(u32::from_le_bytes(cmd.try_into().unwrap()));
             //        warn!("{}: cmd: {:?}, body: {:?}, no fence for submit", function!(), cmd, body);
             //    } else {
@@ -947,8 +945,8 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         let rsp = self.read_rsp_header(i);
         let req = self.read_req_header(i);
         if rsp.hdr_type.is_error() {
-            if req.hdr_type == commands::Command::RESOURCE_UNREF {
-                let req = commands::ResourceUnref::read_from_prefix(self.buffers.inputs[i].as_ref().unwrap().as_ref()).unwrap().0;
+            if req.hdr_type == gpu::Command::RESOURCE_UNREF {
+                let req = gpu::ResourceUnref::read_from_prefix(self.buffers.inputs[i].as_ref().unwrap().as_ref()).unwrap().0;
                 error!("{}: request {:?} failed with error {:?}", function!(), req, rsp.hdr_type);
             } else {
                 error!("{}: request {:?} failed with error {:?}", function!(), req, rsp.hdr_type);
@@ -1006,13 +1004,13 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         /*
         if let Some((Engine::Other(_), fence)) = callback.as_dma_completed() {
             let input = self.buffers.inputs[i].as_ref().unwrap().as_ref();
-            let hdr = commands::CtrlHeader::read_from_prefix(input).unwrap().0;
+            let hdr = gpu::CtrlHeader::read_from_prefix(input).unwrap().0;
             info!("{}: {:?}: dxgk_fence {} (completed)", function!(), hdr.hdr_type, fence);
         } else if let Callback::None = callback {
             let input = self.buffers.inputs[i].as_ref().unwrap().as_ref();
-            let hdr = commands::CtrlHeader::read_from_prefix(input).unwrap().0;
-            if hdr.hdr_type == commands::Command::SUBMIT_3D {
-                let body = &input[size_of::<commands::CmdSubmit3d>()..];
+            let hdr = gpu::CtrlHeader::read_from_prefix(input).unwrap().0;
+            if hdr.hdr_type == gpu::Command::SUBMIT_3D {
+                let body = &input[size_of::<gpu::CmdSubmit3D>()..];
 
                 let offset = 0;
                 let typed_data = unsafe {
@@ -1242,8 +1240,9 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
     //}
 }
 
-type ControlQueue = Queue<QUEUE_TRANSMIT, CONTROL_QUEUE_SIZE, CONTROL_FAST_QUEUE_SIZE, MAX_COMMAND_SIZE, MAX_RESPONSE_SIZE>;
-type CursorQueue = Queue<QUEUE_CURSOR, CURSOR_QUEUE_SIZE, CURSOR_FAST_QUEUE_SIZE, CURSOR_COMMAND_SIZE, CURSOR_RESPONSE_SIZE>;
+
+type ControlQueue = Queue<{ gpu::QUEUE_TRANSMIT }, CONTROL_QUEUE_SIZE, CONTROL_FAST_QUEUE_SIZE, MAX_COMMAND_SIZE, MAX_RESPONSE_SIZE>;
+type CursorQueue = Queue<{ gpu::QUEUE_CURSOR }, CURSOR_QUEUE_SIZE, CURSOR_FAST_QUEUE_SIZE, CURSOR_COMMAND_SIZE, CURSOR_RESPONSE_SIZE>;
 type ControlChannel = QueueChannel<MAX_COMMAND_SIZE, MAX_RESPONSE_SIZE>;
 type CursorChannel = QueueChannel<CURSOR_COMMAND_SIZE, CURSOR_RESPONSE_SIZE>;
 
@@ -1693,18 +1692,18 @@ impl GpuChannel {
         self.cursor.get_queue_event().set();
     }
 
-    pub fn new_header(&self, hdr_type: commands::Command, fence: bool, context: Option<NonZero<u32>>, ring: Option<u8>) -> commands::CtrlHeader {
+    pub fn new_header(&self, hdr_type: gpu::Command, fence: bool, context: Option<NonZero<u32>>, ring: Option<u8>) -> gpu::CtrlHeader {
         let mut flags: u32 = 0;
 
         let fence_id = if fence {
-            flags |= commands::GPU_FLAG_FENCE;
+            flags |= gpu::GPU_FLAG_FENCE;
             self.data.fence.next_fence()
         } else {
             0
         };
 
         let ring_idx = if let Some(ring_idx) = ring {
-            flags |= commands::GPU_FLAG_RING_INDEX;
+            flags |= gpu::GPU_FLAG_RING_INDEX;
             ring_idx
         } else {
             0
@@ -1716,7 +1715,7 @@ impl GpuChannel {
             0
         };
 
-        commands::CtrlHeader {
+        gpu::CtrlHeader {
             hdr_type,
             flags,
             fence_id,
@@ -1729,14 +1728,14 @@ impl GpuChannel {
     fn get_capset_info(&self, capset_index: u32) -> Result<(u32, CapsetInfo), NtStatus> {
         trace!("{}", function!());
 
-        let cmd = commands::GetCapsetInfo {
-            header: self.new_header(commands::Command::GET_CAPSET_INFO, true, None, None),
+        let cmd = gpu::CmdGetCapsetInfo {
+            header: self.new_header(gpu::Command::GET_CAPSET_INFO, true, None, None),
             capset_index,
             _padding: 0,
         };
 
-        let resp: commands::RespCapsetInfo = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.header.check_type(commands::Command::OK_CAPSET_INFO))?;
+        let resp: gpu::RespCapsetInfo = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.header.check_type(gpu::Command::OK_CAPSET_INFO))?;
 
         let id = resp.capset_id;
         let version = resp.capset_max_version;
@@ -1784,28 +1783,28 @@ impl GpuChannel {
     pub fn get_capset(&self, id: CapsetId, info: &CapsetInfo) -> Result<Box<[u8]>, NtStatus> {
         trace!("{}", function!());
 
-        let cmd = commands::GetCapset {
-            header: self.new_header(commands::Command::GET_CAPSET, true, None, None),
+        let cmd = gpu::CmdGetCapset {
+            header: self.new_header(gpu::Command::GET_CAPSET, true, None, None),
             capset_id: id as _,
             capset_version: info.version,
         };
 
-        let output = MaybeInlineBuffer::try_new_zeroed_size(size_of::<commands::RespCapset>() + (info.size as usize))?;
+        let output = MaybeInlineBuffer::try_new_zeroed_size(size_of::<gpu::CtrlHeader>() + (info.size as usize))?;
         let output = self.control.request_blocking_into_buf(cmd, output)?;
 
-        let hdr: commands::CtrlHeader = commands::CtrlHeader::read_from_prefix(output.as_ref()).unwrap().0;
-        map_virtio_error!(hdr.check_type(commands::Command::OK_CAPSET))?;
+        let hdr: gpu::CtrlHeader = gpu::CtrlHeader::read_from_prefix(output.as_ref()).unwrap().0;
+        map_virtio_error!(hdr.check_type(gpu::Command::OK_CAPSET))?;
 
-        output.into_boxed(size_of::<commands::CtrlHeader>())
+        output.into_boxed(size_of::<gpu::CtrlHeader>())
     }
 
-    pub fn get_display_info(&self) -> Result<[commands::DisplayOne; 16], NtStatus> {
+    pub fn get_display_info(&self) -> Result<[gpu::DisplayOne; 16], NtStatus> {
         trace!("{}", function!());
 
-        let cmd = self.new_header(commands::Command::GET_DISPLAY_INFO, true, None, None);
+        let cmd = self.new_header(gpu::Command::GET_DISPLAY_INFO, true, None, None);
 
-        let resp: commands::RespDisplayInfo = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.header.check_type(commands::Command::OK_DISPLAY_INFO))?;
+        let resp: gpu::RespDisplayInfo = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.header.check_type(gpu::Command::OK_DISPLAY_INFO))?;
 
         Ok(resp.pmodes)
     }
@@ -1820,8 +1819,8 @@ impl GpuChannel {
             return Err(NtStatus(STATUS::BUFFER_TOO_SMALL));
         }
 
-        let cmd = commands::CtxCreate {
-            header: self.new_header(commands::Command::CTX_CREATE, true, Some(ctx_id), None),
+        let cmd = gpu::CmdCtxCreate {
+            header: self.new_header(gpu::Command::CTX_CREATE, true, Some(ctx_id), None),
             nlen: name.len() as u32,
             context_init: capset_id as u32,
             debug_name: {
@@ -1832,33 +1831,31 @@ impl GpuChannel {
             }
         };
 
-        let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.check_type(commands::Command::OK_NODATA))?;
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA))?;
 
         Ok(ctx_id)
     }
 
     pub fn context_destroy(&self, id: NonZero<u32>) -> Result<(), NtStatus> {
-        let cmd = commands::CtxDestroy {
-            header: self.new_header(commands::Command::CTX_DESTROY, true, Some(id), None),
-        };
-        self.control.request_async::<_, commands::CtrlHeader>(cmd, Callback::FreeContextId(id))?;
+        let cmd = self.new_header(gpu::Command::CTX_DESTROY, true, Some(id), None);
+        self.control.request_async::<_, gpu::CtrlHeader>(cmd, Callback::FreeContextId(id))?;
 
         Ok(())
     }
 
-    pub fn resource_create_2d(&self, width: u32, height: u32, format: commands::Format) -> Result<NonZero<u32>, NtStatus> {
+    pub fn resource_create_2d(&self, width: u32, height: u32, format: gpu::Format) -> Result<NonZero<u32>, NtStatus> {
         let resource_id = self.next_resource_id().ok_or(STATUS::NO_MEMORY)?;
-        let cmd = commands::ResourceCreate2d {
-            header: self.new_header(commands::Command::RESOURCE_CREATE_2D, true, None, None),
+        let cmd = gpu::ResourceCreate2D {
+            header: self.new_header(gpu::Command::RESOURCE_CREATE_2D, true, None, None),
             resource_id: resource_id.get(),
-            format: format as u32,
+            format,
             width,
             height,
         };
 
-        let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_| {
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_| {
             warn!("{}: failed to create resource 2d {}", function!(), resource_id.get());
             self.data.resource_id.free(resource_id.get())
         })?;
@@ -1868,8 +1865,8 @@ impl GpuChannel {
 
     pub fn resource_create_3d(&self, info: &Allocate3d) -> Result<NonZero<u32>, NtStatus> {
         let resource_id = self.next_resource_id().ok_or(STATUS::NO_MEMORY)?;
-        let cmd = commands::ResourceCreate3d {
-            header: self.new_header(commands::Command::RESOURCE_CREATE_3D, true, None, None),
+        let cmd = gpu::CmdResourceCreate3D {
+            header: self.new_header(gpu::Command::RESOURCE_CREATE_3D, true, None, None),
             resource_id: resource_id.get(),
             target: info.target,
             format: info.format,
@@ -1884,8 +1881,8 @@ impl GpuChannel {
             _padding: 0,
         };
 
-        let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_| {
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_| {
             warn!("{}: failed to create resource 3d {}", function!(), resource_id.get());
             self.data.resource_id.free(resource_id.get())
         })?;
@@ -1894,32 +1891,32 @@ impl GpuChannel {
     }
 
     pub fn context_attach_resource(&self, ctx_id: NonZero<u32>, res_id: NonZero<u32>) -> Result<(), NtStatus> {
-        let cmd = commands::CtxResource {
-            header: self.new_header(commands::Command::CTX_ATTACH_RESOURCE, true, Some(ctx_id), None),
+        let cmd = gpu::CmdCtxResource {
+            header: self.new_header(gpu::Command::CTX_ATTACH_RESOURCE, true, Some(ctx_id), None),
             resource_id: res_id.get(),
             _padding: 0,
         };
-        let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_|
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
             warn!("{}: failed to attach resource {} to context {}", function!(), res_id.get(), ctx_id.get())
         )
     }
 
     pub fn context_detach_resource(&self, ctx_id: NonZero<u32>, res_id: NonZero<u32>) -> Result<(), NtStatus> {
-        let cmd = commands::CtxResource {
-            header: self.new_header(commands::Command::CTX_DETACH_RESOURCE, true, Some(ctx_id), None),
+        let cmd = gpu::CmdCtxResource {
+            header: self.new_header(gpu::Command::CTX_DETACH_RESOURCE, true, Some(ctx_id), None),
             resource_id: res_id.get(),
             _padding: 0,
         };
-        let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_|
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
             warn!("{}: failed to detach resource {} from context {}", function!(), res_id.get(), ctx_id.get())
         )
     }
 
     pub fn resource_create_blob(&self, ctx_id: NonZero<u32>, res_id: NonZero<u32>, blob_id: u64, mem: BlobMem, flags: BlobFlag, size: u64) -> Result<(), NtStatus> {
-        let cmd = commands::ResourceCreateBlob {
-            header: self.new_header(commands::Command::RESOURCE_CREATE_BLOB, true, Some(ctx_id), None),
+        let cmd = gpu::CmdResourceCreateBlob {
+            header: self.new_header(gpu::Command::RESOURCE_CREATE_BLOB, true, Some(ctx_id), None),
             resource_id: res_id.get(),
             blob_mem: mem.bits(),
             blob_flags: flags.bits(),
@@ -1928,8 +1925,8 @@ impl GpuChannel {
             size,
         };
 
-        let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_|
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
             warn!("{}: failed to create resource blob {} ({})", function!(), res_id.get(), blob_id)
         )?;
 
@@ -1942,15 +1939,15 @@ impl GpuChannel {
         let offset = self.data.offset_allocator.lock().allocate(pages).ok_or(STATUS::NO_MEMORY)?;
         let bar_offset = (offset.offset as u64) * (PAGE_SIZE as u64);
 
-        let cmd = commands::ResourceMapBlob {
-            header: self.new_header(commands::Command::RESOURCE_MAP_BLOB, true, Some(ctx_id), None),
+        let cmd = gpu::CmdResourceMapBlob {
+            header: self.new_header(gpu::Command::RESOURCE_MAP_BLOB, true, Some(ctx_id), None),
             resource_id: res_id.get(),
             _padding: 0,
             offset: bar_offset,
         };
 
-        let map_info = self.control.request_blocking::<_, commands::RespMapInfo>(cmd)?;
-        map_virtio_error!(map_info.header.check_type(commands::Command::OK_MAP_INFO)).inspect_err(|_|
+        let map_info = self.control.request_blocking::<_, gpu::RespMapInfo>(cmd)?;
+        map_virtio_error!(map_info.header.check_type(gpu::Command::OK_MAP_INFO)).inspect_err(|_|
             warn!("{}: failed to map blob {}", function!(), res_id.get())
         )?;
 
@@ -1960,28 +1957,28 @@ impl GpuChannel {
     pub fn resource_unmap_blob(&self, id: NonZero<u32>, offset: offset_allocator::Allocation) -> Result<(), NtStatus> {
         self.data.offset_allocator.lock().free(offset);
 
-        let cmd = commands::ResourceUnmapBlob {
-            header: self.new_header(commands::Command::RESOURCE_UNMAP_BLOB, true, None, None),
+        let cmd = gpu::CmdResourceUnmapBlob {
+            header: self.new_header(gpu::Command::RESOURCE_UNMAP_BLOB, true, None, None),
             resource_id: id.get(),
             _padding: 0,
         };
-        self.control.request_blocking::<_, commands::CtrlHeader>(cmd)?;
+        self.control.request_blocking::<_, gpu::CtrlHeader>(cmd)?;
 
         Ok(())
     }
 
     // TODO: maybe add a special async callback type for set_cursor / set_scanout + flush
-    pub fn resource_transfer_to_host_2d(&self, rect: commands::Rect, offset: u64, resource_id: NonZero<u32>) -> Result<(), NtStatus> {
-        let cmd = commands::TransferToHost2d {
-            header: self.new_header(commands::Command::TRANSFER_TO_HOST_2D, true, None, None),
+    pub fn resource_transfer_to_host_2d(&self, rect: gpu::Rect, offset: u64, resource_id: NonZero<u32>) -> Result<(), NtStatus> {
+        let cmd = gpu::TransferToHost2D {
+            header: self.new_header(gpu::Command::TRANSFER_TO_HOST_2D, true, None, None),
             rect,
             offset,
             resource_id: resource_id.get(),
             _padding: 0,
         };
 
-        let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_| {
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_| {
             warn!("{}: failed to transfer resource 2d {}", function!(), resource_id.get());
             self.data.resource_id.free(resource_id.get())
         })?;
@@ -1989,27 +1986,27 @@ impl GpuChannel {
         Ok(())
     }
 
-    pub fn resource_flush(&self, id: NonZero<u32>, rect: commands::Rect) -> Result<(), NtStatus> {
-        let cmd = commands::ResourceFlush {
-            header: self.new_header(commands::Command::RESOURCE_FLUSH, false, None, None),
+    pub fn resource_flush(&self, id: NonZero<u32>, rect: gpu::Rect) -> Result<(), NtStatus> {
+        let cmd = gpu::ResourceFlush {
+            header: self.new_header(gpu::Command::RESOURCE_FLUSH, false, None, None),
             resource_id: id.get(),
             rect,
             _padding: 0,
         };
-        self.control.request_async::<_, commands::CtrlHeader>(cmd, Callback::None)?;
+        self.control.request_async::<_, gpu::CtrlHeader>(cmd, Callback::None)?;
 
         Ok(())
     }
 
     pub fn resource_detach_backing(&self, id: NonZero<u32>) -> Result<(), NtStatus> {
-        let cmd = commands::ResourceDetachBacking {
-            header: self.new_header(commands::Command::RESOURCE_DETACH_BACKING, true, None, None),
+        let cmd = gpu::ResourceDetachBacking {
+            header: self.new_header(gpu::Command::RESOURCE_DETACH_BACKING, true, None, None),
             resource_id: id.get(),
             _padding: 0,
         };
 
-        let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_|
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
             warn!("{}: failed to detach backing from resource {}", function!(), id.get())
         )?;
 
@@ -2017,19 +2014,19 @@ impl GpuChannel {
     }
 
     pub fn resource_unref(&self, id: NonZero<u32>) -> Result<(), NtStatus> {
-        let cmd = commands::ResourceUnref {
-            header: self.new_header(commands::Command::RESOURCE_UNREF, true, None, None),
+        let cmd = gpu::ResourceUnref {
+            header: self.new_header(gpu::Command::RESOURCE_UNREF, true, None, None),
             resource_id: id.get(),
             _padding: 0,
         };
-        self.control.request_async::<_, commands::CtrlHeader>(cmd, Callback::FreeResourceId(id))?;
+        self.control.request_async::<_, gpu::CtrlHeader>(cmd, Callback::FreeResourceId(id))?;
 
         Ok(())
     }
 
     pub fn submit_async(&self, data: AlignedBox<[u8]>) -> Result<(), NtStatus> {
         let input = MaybeInlineBuffer::Boxed { data };
-        let output = MaybeInlineBuffer::try_new_zeroed::<commands::CtrlHeader>()?;
+        let output = MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?;
         let callback = Callback::None;
         self.control.request_async_buf(input, output, callback)
     }
@@ -2042,11 +2039,11 @@ impl GpuChannel {
         )?;
 
         let input = MaybeInlineBuffer::Dma { data: dma };
-        let output = MaybeInlineBuffer::try_new_zeroed::<commands::CtrlHeader>()?;
+        let output = MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?;
         //let output = if cmd.id == CommandId::MapBlob {
-        //    MaybeInlineBuffer::try_new_zeroed::<commands::RespMapInfo>()?
+        //    MaybeInlineBuffer::try_new_zeroed::<gpu::RespMapInfo>()?
         //} else {
-        //    MaybeInlineBuffer::try_new_zeroed::<commands::CtrlHeader>()?
+        //    MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?
         //};
 
         self.control.request_blocking_buf(input, output, DEFAULT_BLOCKING_TIMEOUT)?;
@@ -2088,11 +2085,11 @@ impl GpuChannel {
         )?;
 
         //if cmd.id == CommandId::MapBlob {
-        //    self.control.request_async_dma::<commands::RespMapInfo>(dma, fence, allocations)
+        //    self.control.request_async_dma::<gpu::RespMapInfo>(dma, fence, allocations)
         //} else {
-        //    self.control.request_async_dma::<commands::CtrlHeader>(dma, fence, allocations)
+        //    self.control.request_async_dma::<gpu::CtrlHeader>(dma, fence, allocations)
         //}
-        self.control.request_async_dma::<commands::CtrlHeader>(dma, engine, fence, allocations)
+        self.control.request_async_dma::<gpu::CtrlHeader>(dma, engine, fence, allocations)
     }
 
     pub fn submit_command_batch(&self, engine: Engine, fence: u32, cmds: &[Command], allocations: AllocationsBatch) -> Result<(), NtStatus> {
@@ -2108,11 +2105,11 @@ impl GpuChannel {
             let dma = cmd.dma().unwrap();
             debug!("{}: Sending async dma command batch ({}): {:?}", function!(), Arc::strong_count(&allocations), cmd);
             //if cmd.id == CommandId::MapBlob {
-            //    self.control.request_async_dma_batched::<commands::RespMapInfo>(dma, fence, allocations.clone())?;
+            //    self.control.request_async_dma_batched::<gpu::RespMapInfo>(dma, fence, allocations.clone())?;
             //} else {
-            //    self.control.request_async_dma_batched::<commands::CtrlHeader>(dma, fence, allocations.clone())?;
+            //    self.control.request_async_dma_batched::<gpu::CtrlHeader>(dma, fence, allocations.clone())?;
             //}
-            self.control.request_async_dma_batched::<commands::CtrlHeader>(dma, engine, fence, allocations.clone())?;
+            self.control.request_async_dma_batched::<gpu::CtrlHeader>(dma, engine, fence, allocations.clone())?;
         }
         self.control.get_queue_event().set();
 
@@ -2129,14 +2126,14 @@ impl GpuChannel {
         trace!("{}: engine {:?}, fence {}, ctx {}, ring {:?}, data {:?}", function!(), engine, fence, ctx_id, ring, data);
         self.data.engines[engine.node_ordinal() as usize].submit(fence);
 
-        let hdr = commands::CmdSubmit3d {
-            header: self.new_header(commands::Command::SUBMIT_3D, true, Some(ctx_id), ring),
+        let hdr = gpu::CmdSubmit3D {
+            header: self.new_header(gpu::Command::SUBMIT_3D, true, Some(ctx_id), ring),
             size: data.len() as _,
             _padding: 0,
         };
 
         let input = MaybeInlineBuffer::try_from_hdr_with_body(hdr, data)?;
-        let output = MaybeInlineBuffer::try_new_zeroed::<commands::CtrlHeader>()?;
+        let output = MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?;
 
         let callback = Callback::DmaCompleted(engine, fence);
 
@@ -2146,66 +2143,68 @@ impl GpuChannel {
     pub fn submit_command_buffer_with_fence(&self, engine: Engine, ctx_id: NonZero<u32>, ring: Option<u8>, data: &[u8]) -> Result<u64, NtStatus> {
         trace!("{}: engine {:?}, ctx {}, ring {:?}, data {:?}", function!(), engine, ctx_id, ring, data);
 
-        let hdr = commands::CmdSubmit3d {
-            header: self.new_header(commands::Command::SUBMIT_3D, true, Some(ctx_id), ring),
+        let hdr = gpu::CmdSubmit3D {
+            header: self.new_header(gpu::Command::SUBMIT_3D, true, Some(ctx_id), ring),
             size: data.len() as _,
             _padding: 0,
         };
 
+        let fence_id = hdr.header.fence_id;
+
         let input = MaybeInlineBuffer::try_from_hdr_with_body(hdr, data)?;
-        let output = MaybeInlineBuffer::try_new_zeroed::<commands::CtrlHeader>()?;
+        let output = MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?;
         self.control.request_async_buf(input, output, Callback::None)?;
 
-        Ok(hdr.header.fence_id)
+        Ok(fence_id)
     }
 
-    pub fn get_edid(&self, scanout: u32) -> Result<Box<Edid>, NtStatus> {
-        let cmd = commands::GetEdid {
-            header: self.new_header(commands::Command::GET_EDID, true, None, None),
+    pub fn get_edid(&self, scanout: u32) -> Result<Box<gpu::Edid>, NtStatus> {
+        let cmd = gpu::CmdGetEdid {
+            header: self.new_header(gpu::Command::GET_EDID, true, None, None),
             scanout,
             _padding: 0,
         };
 
-        let out = self.control.request_blocking_into_buf(cmd, MaybeInlineBuffer::try_new_zeroed::<commands::RespGetEdid>()?)?;
+        let out = self.control.request_blocking_into_buf(cmd, MaybeInlineBuffer::try_new_zeroed::<gpu::RespEdid>()?)?;
 
-        let resp = commands::RespGetEdid::ref_from_prefix(out.as_ref()).map_err(|e| {
+        let resp = gpu::RespEdid::ref_from_prefix(out.as_ref()).map_err(|e| {
             error!("{}: failed to request EDID for scanout {}: {:?}", function!(), scanout, e);
             STATUS::IO_DEVICE_ERROR
         })?.0;
 
-        map_virtio_error!(resp.header.check_type(commands::Command::OK_EDID)).inspect_err(|_|
+        map_virtio_error!(resp.header.check_type(gpu::Command::OK_EDID)).inspect_err(|_|
             error!("{}: failed to request EDID for scanout {}: invalid response type", function!(), scanout)
         )?;
 
-        let edid = Box::try_new(Edid {
+        let edid = Box::try_new(gpu::Edid {
             data: resp.edid,
             size: resp.size,
         })?;
         Ok(edid)
     }
 
-    pub fn set_scanout(&self, rect: commands::Rect, scanout: u32, res_id: NonZero<u32>) -> Result<(), NtStatus> {
-        let cmd = commands::SetScanout {
-            header: self.new_header(commands::Command::SET_SCANOUT, false, None, None),
+    pub fn set_scanout(&self, rect: gpu::Rect, scanout: u32, res_id: NonZero<u32>) -> Result<(), NtStatus> {
+        let cmd = gpu::SetScanout {
+            header: self.new_header(gpu::Command::SET_SCANOUT, false, None, None),
             rect,
             scanout_id: scanout,
             resource_id: res_id.get(),
         };
 
         // FIXME: we cannot really do blocking stuff here. Timer callbacks seem to be called with an IRQL that is too high
-        // let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        // map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_|
+        // let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        // map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
         //     warn!("{}: failed to set scanout {} to {}", function!(), scanout, res_id.get())
         // )?;
 
-        self.control.request_async::<_, commands::CtrlHeader>(cmd, Callback::None)?;
+        self.control.request_async::<_, gpu::CtrlHeader>(cmd, Callback::None)?;
 
         Ok(())
     }
 
-    pub fn set_scanout_blob(&self, rect: commands::Rect, scanout: u32, res_id: NonZero<u32>, info: BlobInfo) -> Result<(), NtStatus> {
-        let cmd = commands::SetScanoutBlob {
-            header: self.new_header(commands::Command::SET_SCANOUT_BLOB, false, None, None),
+    pub fn set_scanout_blob(&self, rect: gpu::Rect, scanout: u32, res_id: NonZero<u32>, info: BlobInfo) -> Result<(), NtStatus> {
+        let cmd = gpu::SetScanoutBlob {
+            header: self.new_header(gpu::Command::SET_SCANOUT_BLOB, false, None, None),
             rect,
             scanout_id: scanout,
             resource_id: res_id.get(),
@@ -2218,20 +2217,20 @@ impl GpuChannel {
         };
 
         // FIXME: we cannot really do blocking stuff here. Timer callbacks seem to be called with an IRQL that is too high
-        // let resp: commands::CtrlHeader = self.control.request_blocking(cmd)?;
-        // map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_|
+        // let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        // map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
         //     warn!("{}: failed to set scanout {} to {}", function!(), scanout, res_id.get())
         // )?;
 
-        self.control.request_async::<_, commands::CtrlHeader>(cmd, Callback::None)?;
+        self.control.request_async::<_, gpu::CtrlHeader>(cmd, Callback::None)?;
 
         Ok(())
     }
 
     pub fn move_cursor(&self, scanout_id: u32, x: u32, y: u32) -> Result<(), NtStatus> {
-        let cmd = commands::UpdateCursor {
-            header: self.new_header(commands::Command::MOVE_CURSOR, true, None, None),
-            pos: commands::CursorPos {
+        let cmd = gpu::UpdateCursor {
+            header: self.new_header(gpu::Command::MOVE_CURSOR, true, None, None),
+            pos: gpu::CursorPos {
                 scanout_id,
                 x,
                 y,
@@ -2247,11 +2246,11 @@ impl GpuChannel {
 
         // FIXME: it seems that QEMU does not handle the response properly
 
-        self.cursor.request_async::<_, commands::CtrlHeader>(cmd, Callback::None)?;
+        self.cursor.request_async::<_, gpu::CtrlHeader>(cmd, Callback::None)?;
 
-        //let resp: commands::CtrlHeader = self.cursor.request_blocking(cmd)?;
+        //let resp: gpu::CtrlHeader = self.cursor.request_blocking(cmd)?;
         // FIXME: this errors out even though cursor is set just fine
-        // map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_|
+        // map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
         //     warn!("{}: failed to move cursor on {}", function!(), scanout_id)
         // )?;
 
@@ -2259,9 +2258,9 @@ impl GpuChannel {
     }
 
     pub fn update_cursor(&self, scanout_id: u32, resource_id: NonZero<u32>, hot_x: u32, hot_y: u32, x: u32, y: u32) -> Result<(), NtStatus> {
-        let cmd = commands::UpdateCursor {
-            header: self.new_header(commands::Command::UPDATE_CURSOR, true, None, None),
-            pos: commands::CursorPos {
+        let cmd = gpu::UpdateCursor {
+            header: self.new_header(gpu::Command::UPDATE_CURSOR, true, None, None),
+            pos: gpu::CursorPos {
                 scanout_id,
                 x,
                 y,
@@ -2275,11 +2274,11 @@ impl GpuChannel {
 
         // FIXME: it seems that QEMU does not handle the response properly
 
-        self.cursor.request_async::<_, commands::CtrlHeader>(cmd, Callback::None)?;
+        self.cursor.request_async::<_, gpu::CtrlHeader>(cmd, Callback::None)?;
 
-        //let resp: commands::CtrlHeader = self.cursor.request_blocking(cmd)?;
+        //let resp: gpu::CtrlHeader = self.cursor.request_blocking(cmd)?;
         // FIXME: this errors out even though cursor is set just fine
-        // map_virtio_error!(resp.check_type(commands::Command::OK_NODATA)).inspect_err(|_|
+        // map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
         //     warn!("{}: failed to update cursor on {}", function!(), scanout_id)
         // )?;
 
@@ -2303,12 +2302,12 @@ const _: () = assert!(size_of::<QueueHandler>() <= 21504*2);
 unsafe impl Send for QueueHandler {}
 
 impl QueueHandler {
-    pub fn new(mut pci_transport: PciTransport, interface: DxgkInterface, negotiated_features: Features, shmem: VirtioCapabilityInfo) -> impl Init<Self, NtStatus> {
+    pub fn new(mut pci_transport: PciTransport, interface: DxgkInterface, negotiated_features: gpu::Features, shmem: VirtioCapabilityInfo) -> impl Init<Self, NtStatus> {
         //trace!("{}: {}", function!(), io_get_remaining_stack_size());
 
-        let access_platform = negotiated_features.contains(Features::ACCESS_PLATFORM);
-        let indirect = negotiated_features.contains(Features::RING_INDIRECT_DESC);
-        let event_idx = negotiated_features.contains(Features::RING_EVENT_IDX);
+        let access_platform = negotiated_features.contains(gpu::Features::ACCESS_PLATFORM);
+        let indirect = negotiated_features.contains(gpu::Features::RING_INDIRECT_DESC);
+        let event_idx = negotiated_features.contains(gpu::Features::RING_EVENT_IDX);
 
         init_scope(move || {
             Ok(init!(Self {
@@ -2487,7 +2486,7 @@ impl Drop for QueueHandler {
         }
         info!("{}: queue handler thread stopped", function!());
 
-        self.pci_transport.queue_unset(QUEUE_TRANSMIT);
-        self.pci_transport.queue_unset(QUEUE_CURSOR);
+        self.pci_transport.queue_unset(gpu::QUEUE_TRANSMIT);
+        self.pci_transport.queue_unset(gpu::QUEUE_CURSOR);
     }
 }

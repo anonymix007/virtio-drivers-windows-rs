@@ -25,11 +25,9 @@ microseh = { path = "../util/microseh", features = [], default-features = false 
 offset-allocator = { path = "../util/offset-allocator" }
 #sorted-vec = { path = "../util/sorted-vec" }
 smallvec.workspace = true
-atomicbox.workspace = true
 hashbrown.workspace = true
 modular-bitfield.workspace = true
 itertools.workspace = true
 
 [build-dependencies]
 chrono.workspace = true
-ewdk = { path = "../util/ewdk" }

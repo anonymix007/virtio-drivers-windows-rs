@@ -20,7 +20,7 @@ use alloc::{
     },
 };
 
-use virtio_drivers::device::gpu::*;
+use virtio_drivers::device::gpu;
 use winresult::STATUS;
 use zerocopy::*;
 use microseh;
@@ -109,7 +109,7 @@ impl QueryBuffer {
 
         device.chan.context_attach_resource(ctx_id, id)?;
 
-        let mut cmd_data = [0u8; size_of::<commands::ResourceAttachBacking>() + size_of::<commands::MemEntry>()];
+        let mut cmd_data = [0u8; size_of::<gpu::ResourceAttachBacking>() + size_of::<gpu::MemEntry>()];
         assert_eq!(Command::attach_backing_dma_len(1), size_of_val(&cmd_data));
 
         let cmd = Command::attach_backing_box(&device.chan, id, &buf, &mut cmd_data);
@@ -261,7 +261,7 @@ impl Device {
             query.as_ref().unwrap()
         };
 
-        let mut cmd_data = [0u8; size_of::<commands::CmdSubmit3d>() + size_of::<VirglGetResourceLayout>()];
+        let mut cmd_data = [0u8; size_of::<gpu::CmdSubmit3D>() + size_of::<VirglGetResourceLayout>()];
         assert_eq!(Command::virgl_get_resource_layout_dma_len(), size_of_val(&cmd_data));
 
         let cmd = Command::virgl_get_resource_layout(&self.chan, ctx_id, query.id, target, None, &mut cmd_data);
@@ -900,9 +900,9 @@ impl Device {
     pub fn context_submit_3d(&self, mut data: AlignedBox<[u8]>) -> Result<(), NtStatus> {
         let ctx_id = self.context_internal(false).ok_or(STATUS::REINITIALIZATION_NEEDED)?.0;
 
-        let hdr = commands::CmdSubmit3d {
-            header: self.chan.new_header(commands::Command::SUBMIT_3D, false, Some(ctx_id), None),
-            size: (data.len() - size_of::<commands::CmdSubmit3d>()) as _,
+        let hdr = gpu::CmdSubmit3D {
+            header: self.chan.new_header(gpu::Command::SUBMIT_3D, false, Some(ctx_id), None),
+            size: (data.len() - size_of::<gpu::CmdSubmit3D>()) as _,
             _padding: 0,
         };
 

@@ -41,7 +41,7 @@ use crate::*;
 use virtio_drivers::{
     BufferDirection,
     Dma,
-    device::gpu::*,
+    device::gpu,
 };
 use zerocopy::*;
 use crossbeam::queue::*;
@@ -996,7 +996,7 @@ impl MonitorMode {
 }
 
 pub struct FlipTimerContext {
-    pub rects: [commands::Rect; 16],
+    pub rects: [gpu::Rect; 16],
     pub addrs: [AtomicU64; 16],
     //pub addrs: [(AtomicU64, AtomicPtr<Allocation>); 16],
     pub flipq: [Option<Arc<ArrayQueue<(Weak<Allocation>, u64)>>>; 16],
@@ -1215,7 +1215,7 @@ impl Cursor {
 
     pub fn try_new(chan: &GpuChannel, width: u32, height: u32, x_hot: u32, y_hot: u32, x: u32, y: u32) -> Result<Self, NtStatus> {
         // A8R8G8B8UNORM
-        let pixels = Framebuffer::try_new(chan, width, height, commands::Format::B8G8R8A8UNORM)?;
+        let pixels = Framebuffer::try_new(chan, width, height, gpu::Format::B8G8R8A8UNORM)?;
         let hotspot = (x_hot, y_hot);
         let position = (x, y);
         let hidden = false;
@@ -1410,8 +1410,8 @@ impl Cursor {
 }
 
 pub struct VidPnOutput {
-    pub rect: commands::Rect,
-    pub edid: Box<Edid>,
+    pub rect: gpu::Rect,
+    pub edid: Box<gpu::Edid>,
     pub current_mode: Option<usize>,
     pub modes: Vec<MonitorMode>,
     pub flipq: Arc<ArrayQueue<(Weak<Allocation>, u64)>>,
@@ -1420,7 +1420,7 @@ pub struct VidPnOutput {
 }
 
 impl VidPnOutput {
-    pub fn new(info: commands::DisplayOne, edid: Box<Edid>) -> Self {
+    pub fn new(info: gpu::DisplayOne, edid: Box<gpu::Edid>) -> Self {
         let preferred = if info.rect.width < 640 || info.rect.height < 480 {
             edid.preferred_resolution().unwrap()
         } else {
@@ -1557,13 +1557,13 @@ impl fmt::Debug for VidPnOutput {
 pub struct Framebuffer {
     pub width: u32,
     pub height: u32,
-    pub format: commands::Format,
+    pub format: gpu::Format,
     pub pixels: AlignedBox<[u8]>,
     pub id: NonZero<u32>,
 }
 
 impl Framebuffer {
-    pub fn try_new(chan: &GpuChannel, width: u32, height: u32, format: commands::Format) -> Result<Self, NtStatus> {
+    pub fn try_new(chan: &GpuChannel, width: u32, height: u32, format: gpu::Format) -> Result<Self, NtStatus> {
         let id = chan.resource_create_2d(width, height, format)?;
 
         let size = (width as usize) * (height as usize) * format.stride();
@@ -1596,7 +1596,7 @@ impl Framebuffer {
 
     // TODO: partial transfers
     pub fn transfer_to_host(&self, chan: &GpuChannel) -> Result<(), NtStatus> {
-        let rect = commands::Rect {
+        let rect = gpu::Rect {
             x: 0,
             y: 0,
             width: self.width,

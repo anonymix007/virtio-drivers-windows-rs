@@ -15,7 +15,7 @@ use alloc::{
 };
 
 use bitflags::bitflags;
-use virtio_drivers::device::gpu::*;
+use virtio_drivers::device::gpu;
 use zerocopy::*;
 
 use wdk::{
@@ -116,14 +116,14 @@ const _: () = assert!(size_of::<Command>() == 24);
 impl Command {
     pub fn body_dma_len(body: &CommandBody) -> usize {
         let item_size = match body {
-            //CommandBody::Nop => size_of::<commands::CmdSubmit3d>(),
+            //CommandBody::Nop => size_of::<gpu::CmdSubmit3D>(),
             CommandBody::Nop => 0,
             CommandBody::Fence(_) => unreachable!("CommandId::Fence cannot be submitted to host"),
-            CommandBody::Submit(_3d) => size_of::<commands::CmdSubmit3d>() + _3d.len(),
-            CommandBody::TransferToHost(_) | CommandBody::TransferFromHost(_) => size_of::<commands::TransferHost3d>(),
+            CommandBody::Submit(_3d) => size_of::<gpu::CmdSubmit3D>() + _3d.len(),
+            CommandBody::TransferToHost(_) | CommandBody::TransferFromHost(_) => size_of::<gpu::CmdTransferHost3D>(),
             //CommandBody::AllocationList(_) => unreachable!("this command is handled in guest"),
-            //CommandBody::MapBlob(_) => size_of::<commands::ResourceMapBlob>(),
-            //CommandBody::UnmapBlob(_) => size_of::<commands::ResourceUnmapBlob>(),
+            //CommandBody::MapBlob(_) => size_of::<gpu::ResourceMapBlob>(),
+            //CommandBody::UnmapBlob(_) => size_of::<gpu::ResourceUnmapBlob>(),
         };
         let item_count = body.len();
 
@@ -132,29 +132,29 @@ impl Command {
 
     pub fn item_dma_len(item: &CommandBodyItem) -> usize {
         match item {
-            //CommandBodyItem::Nop => size_of::<commands::CmdSubmit3d>(),
+            //CommandBodyItem::Nop => size_of::<gpu::CmdSubmit3D>(),
             CommandBodyItem::Nop => 0,
             CommandBodyItem::Fence(_) => unreachable!("CommandId::Fence cannot be submitted to host"),
-            CommandBodyItem::Submit(_3d) => size_of::<commands::CmdSubmit3d>() + _3d.len(),
-            CommandBodyItem::TransferToHost(_) | CommandBodyItem::TransferFromHost(_) => size_of::<commands::TransferHost3d>(),
-            //CommandBodyItem::MapBlob(_) => size_of::<commands::ResourceMapBlob>(),
-            //CommandBodyItem::MapBlobAt(_, _) => size_of::<commands::ResourceMapBlob>(),
-            //CommandBodyItem::UnmapBlob(_) => size_of::<commands::ResourceUnmapBlob>(),
+            CommandBodyItem::Submit(_3d) => size_of::<gpu::CmdSubmit3D>() + _3d.len(),
+            CommandBodyItem::TransferToHost(_) | CommandBodyItem::TransferFromHost(_) => size_of::<gpu::CmdTransferHost3D>(),
+            //CommandBodyItem::MapBlob(_) => size_of::<gpu::ResourceMapBlob>(),
+            //CommandBodyItem::MapBlobAt(_, _) => size_of::<gpu::ResourceMapBlob>(),
+            //CommandBodyItem::UnmapBlob(_) => size_of::<gpu::ResourceUnmapBlob>(),
         }
     }
 
     pub fn virgl_blit_dma_len(rects: &[RECT]) -> usize {
-        size_of::<commands::CmdSubmit3d>() + size_of::<VirglResourceCopyRegion>() * rects.len()
+        size_of::<gpu::CmdSubmit3D>() + size_of::<VirglResourceCopyRegion>() * rects.len()
     }
 
     pub fn virgl_blit(chan: &GpuChannel, context_id: Option<NonZero<u32>>, src: NonZero<u32>, dst: NonZero<u32>, delta: (i32, i32), rects: &[RECT], ring: Option<u8>, dma: &mut [u8]) -> Self {
-        const HEADER_SIZE:    usize = size_of::<commands::CmdSubmit3d>();
+        const HEADER_SIZE:    usize = size_of::<gpu::CmdSubmit3D>();
         const BODY_ITEM_SIZE: usize = size_of::<VirglResourceCopyRegion>();
 
         let body_len = BODY_ITEM_SIZE * rects.len();
 
-        let hdr = commands::CmdSubmit3d {
-            header: chan.new_header(commands::Command::SUBMIT_3D, true, context_id, ring),
+        let hdr = gpu::CmdSubmit3D {
+            header: chan.new_header(gpu::Command::SUBMIT_3D, true, context_id, ring),
             size: body_len as _,
             _padding: 0,
         };
@@ -178,15 +178,15 @@ impl Command {
     }
 
     pub fn virgl_set_type_dma_len() -> usize {
-        size_of::<commands::CmdSubmit3d>() + size_of::<VirglResourceSetType>()
+        size_of::<gpu::CmdSubmit3D>() + size_of::<VirglResourceSetType>()
     }
 
     pub fn virgl_set_type(chan: &GpuChannel, context_id: Option<NonZero<u32>>, id: NonZero<u32>, info: &BlobInfo, ring: Option<u8>, dma: &mut [u8]) -> Self {
-        const HEADER_SIZE: usize = size_of::<commands::CmdSubmit3d>();
+        const HEADER_SIZE: usize = size_of::<gpu::CmdSubmit3D>();
         const BODY_SIZE:   usize = size_of::<VirglResourceSetType>();
 
-        let hdr = commands::CmdSubmit3d {
-            header: chan.new_header(commands::Command::SUBMIT_3D, true, context_id, ring),
+        let hdr = gpu::CmdSubmit3D {
+            header: chan.new_header(gpu::Command::SUBMIT_3D, true, context_id, ring),
             size: BODY_SIZE as _,
             _padding: 0,
         };
@@ -206,15 +206,15 @@ impl Command {
 
 
     pub fn virgl_get_resource_layout_dma_len() -> usize {
-        size_of::<commands::CmdSubmit3d>() + size_of::<VirglGetResourceLayout>()
+        size_of::<gpu::CmdSubmit3D>() + size_of::<VirglGetResourceLayout>()
     }
 
     pub fn virgl_get_resource_layout(chan: &GpuChannel, context_id: NonZero<u32>, out: NonZero<u32>, target: NonZero<u32>, ring: Option<u8>, dma: &mut [u8]) -> Self {
-        const HEADER_SIZE: usize = size_of::<commands::CmdSubmit3d>();
+        const HEADER_SIZE: usize = size_of::<gpu::CmdSubmit3D>();
         const BODY_SIZE:   usize = size_of::<VirglGetResourceLayout>();
 
-        let hdr = commands::CmdSubmit3d {
-            header: chan.new_header(commands::Command::SUBMIT_3D, true, Some(context_id), ring),
+        let hdr = gpu::CmdSubmit3D {
+            header: chan.new_header(gpu::Command::SUBMIT_3D, true, Some(context_id), ring),
             size: BODY_SIZE as _,
             _padding: 0,
         };
@@ -239,10 +239,10 @@ impl Command {
             CommandBodyItem::Nop => {
                 (None, Flags::empty())
                 // /* DEBUG: submit nop as empty 3d command */
-                // const HEADER_SIZE: usize = size_of::<commands::CmdSubmit3d>();
+                // const HEADER_SIZE: usize = size_of::<gpu::CmdSubmit3D>();
                 //
-                // let hdr = commands::CmdSubmit3d {
-                //     header: adapter.queue_handler().unwrap().new_header(commands::Command::SUBMIT_3D, true, context_id, ring),
+                // let hdr = gpu::CmdSubmit3D {
+                //     header: adapter.queue_handler().unwrap().new_header(gpu::Command::SUBMIT_3D, true, context_id, ring),
                 //     size: 0,
                 //     _padding: 0,
                 // };
@@ -253,10 +253,10 @@ impl Command {
                 // (Some(NonNull::from_mut(dma)), Flags::empty())
             },
             CommandBodyItem::Submit(_3d) => {
-                const HEADER_SIZE: usize = size_of::<commands::CmdSubmit3d>();
+                const HEADER_SIZE: usize = size_of::<gpu::CmdSubmit3D>();
 
-                let hdr = commands::CmdSubmit3d {
-                    header: chan.new_header(commands::Command::SUBMIT_3D, true, context_id, ring),
+                let hdr = gpu::CmdSubmit3D {
+                    header: chan.new_header(gpu::Command::SUBMIT_3D, true, context_id, ring),
                     size: _3d.len() as _,
                     _padding: 0,
                 };
@@ -269,10 +269,10 @@ impl Command {
                 (Some(NonNull::from_mut(dma)), Flags::empty())
             },
             CommandBodyItem::TransferToHost(transfer) => {
-                const CMD_SIZE: usize = size_of::<commands::TransferHost3d>();
+                const CMD_SIZE: usize = size_of::<gpu::CmdTransferHost3D>();
 
-                let cmd = commands::TransferHost3d {
-                    header: chan.new_header(commands::Command::TRANSFER_TO_HOST_3D, true, context_id, ring),
+                let cmd = gpu::CmdTransferHost3D {
+                    header: chan.new_header(gpu::Command::TRANSFER_TO_HOST_3D, true, context_id, ring),
                     box_: transfer.r#box.into(),
                     offset: transfer.offset,
                     resource_id: transfer.res_id,
@@ -287,10 +287,10 @@ impl Command {
                 (Some(NonNull::from_mut(dma)), Flags::empty())
             },
             CommandBodyItem::TransferFromHost(transfer) => {
-                const CMD_SIZE: usize = size_of::<commands::TransferHost3d>();
+                const CMD_SIZE: usize = size_of::<gpu::CmdTransferHost3D>();
 
-                let cmd = commands::TransferHost3d {
-                    header: chan.new_header(commands::Command::TRANSFER_FROM_HOST_3D, true, context_id, ring),
+                let cmd = gpu::CmdTransferHost3D {
+                    header: chan.new_header(gpu::Command::TRANSFER_FROM_HOST_3D, true, context_id, ring),
                     box_: transfer.r#box.into(),
                     offset: transfer.offset,
                     resource_id: transfer.res_id,
@@ -308,11 +308,11 @@ impl Command {
                 unreachable!("CommandId::Fence cannot be submitted to host");
             },
             //CommandBodyItem::MapBlob(map) => {
-            //    const CMD_SIZE: usize = size_of::<commands::ResourceMapBlob>();
+            //    const CMD_SIZE: usize = size_of::<gpu::ResourceMapBlob>();
             //
             //    // This command needs to be patched to properly set up offset
-            //    let cmd = commands::ResourceMapBlob {
-            //        header: chan.new_header(commands::Command::RESOURCE_MAP_BLOB, true, context_id, ring),
+            //    let cmd = gpu::ResourceMapBlob {
+            //        header: chan.new_header(gpu::Command::RESOURCE_MAP_BLOB, true, context_id, ring),
             //        resource_id: map.res_id,
             //        _padding: 0,
             //        offset: 0,
@@ -324,10 +324,10 @@ impl Command {
             //    (Some(NonNull::from_mut(dma)), Flags::NEEDS_PATCH)
             //},
             //CommandBodyItem::MapBlobAt(map, offset) => {
-            //    const CMD_SIZE: usize = size_of::<commands::ResourceMapBlob>();
+            //    const CMD_SIZE: usize = size_of::<gpu::ResourceMapBlob>();
             //
-            //    let cmd = commands::ResourceMapBlob {
-            //        header: chan.new_header(commands::Command::RESOURCE_MAP_BLOB, true, context_id, ring),
+            //    let cmd = gpu::ResourceMapBlob {
+            //        header: chan.new_header(gpu::Command::RESOURCE_MAP_BLOB, true, context_id, ring),
             //        resource_id: map.res_id,
             //        _padding: 0,
             //        offset: *offset,
@@ -339,10 +339,10 @@ impl Command {
             //    (Some(NonNull::from_mut(dma)), Flags::empty())
             //},
             //CommandBodyItem::UnmapBlob(map) => {
-            //    const CMD_SIZE: usize = size_of::<commands::ResourceUnmapBlob>();
+            //    const CMD_SIZE: usize = size_of::<gpu::ResourceUnmapBlob>();
             //
-            //    let cmd = commands::ResourceUnmapBlob {
-            //        header: chan.new_header(commands::Command::RESOURCE_UNMAP_BLOB, true, context_id, ring),
+            //    let cmd = gpu::ResourceUnmapBlob {
+            //        header: chan.new_header(gpu::Command::RESOURCE_UNMAP_BLOB, true, context_id, ring),
             //        resource_id: map.res_id,
             //        _padding: 0,
             //    };
@@ -362,37 +362,37 @@ impl Command {
     }
 
     pub const fn attach_backing_dma_len(n_pages: usize) -> usize {
-        const _: () = assert!(size_of::<commands::ResourceAttachBacking>() == 32);
-        const _: () = assert!(size_of::<commands::MemEntry>() == 16);
+        const _: () = assert!(size_of::<gpu::ResourceAttachBacking>() == 32);
+        const _: () = assert!(size_of::<gpu::MemEntry>() == 16);
 
-        size_of::<commands::ResourceAttachBacking>() + n_pages * size_of::<commands::MemEntry>()
+        size_of::<gpu::ResourceAttachBacking>() + n_pages * size_of::<gpu::MemEntry>()
     }
 
     pub fn attach_backing(chan: &GpuChannel, res_id: NonZero<u32>, mdl: MdlRef, offset: usize, n_pages: usize, dma: &mut [u8]) -> Self {
-        const HEADER_SIZE: usize = size_of::<commands::ResourceAttachBacking>();
+        const HEADER_SIZE: usize = size_of::<gpu::ResourceAttachBacking>();
 
-        let hdr = commands::ResourceAttachBacking {
-            header: chan.new_header(commands::Command::RESOURCE_ATTACH_BACKING, true, None, None),
+        let hdr = gpu::ResourceAttachBacking {
+            header: chan.new_header(gpu::Command::RESOURCE_ATTACH_BACKING, true, None, None),
             resource_id: res_id.get(),
             nr_entries: n_pages as _,
         };
 
-        let body_size = n_pages * size_of::<commands::MemEntry>();
+        let body_size = n_pages * size_of::<gpu::MemEntry>();
         let dma = &mut dma[..HEADER_SIZE+body_size];
         let (hdr_dma, body_dma) = dma.split_at_mut(HEADER_SIZE);
         hdr.write_to_prefix(hdr_dma).unwrap();
 
         let entries = unsafe {
-            let addr = transmute::<_, *mut commands::MemEntry>(body_dma.as_mut_ptr());
+            let addr = transmute::<_, *mut gpu::MemEntry>(body_dma.as_mut_ptr());
             slice_from_raw_parts_mut(addr, n_pages)
         };
 
         let phys_pages = &mdl.physical_pages()[offset..];
         for (i, phys_page) in phys_pages.iter().enumerate() {
-            entries[i] = commands::MemEntry {
+            entries[i] = gpu::MemEntry {
                 addr: phys_page * (PAGE_SIZE as u64),
                 length: PAGE_SIZE,
-                _padding: 0,
+                padding: 0,
             };
         };
 
@@ -400,35 +400,35 @@ impl Command {
     }
 
     pub fn attach_backing_box(chan: &GpuChannel, res_id: NonZero<u32>, data: &AlignedBox<[u8]>, dma: &mut [u8]) -> Self {
-        const HEADER_SIZE: usize = size_of::<commands::ResourceAttachBacking>();
+        const HEADER_SIZE: usize = size_of::<gpu::ResourceAttachBacking>();
 
         let n_pages = data.len().div_ceil(PAGE_SIZE as usize);
 
-        let hdr = commands::ResourceAttachBacking {
-            header: chan.new_header(commands::Command::RESOURCE_ATTACH_BACKING, true, None, None),
+        let hdr = gpu::ResourceAttachBacking {
+            header: chan.new_header(gpu::Command::RESOURCE_ATTACH_BACKING, true, None, None),
             resource_id: res_id.get(),
             nr_entries: n_pages as _,
         };
 
-        let body_size = n_pages * size_of::<commands::MemEntry>();
+        let body_size = n_pages * size_of::<gpu::MemEntry>();
         let dma = &mut dma[..HEADER_SIZE+body_size];
         let (hdr_dma, body_dma) = dma.split_at_mut(HEADER_SIZE);
         hdr.write_to_prefix(hdr_dma).unwrap();
 
-        assert!(size_of::<commands::MemEntry>() * n_pages <= body_dma.len());
+        assert!(size_of::<gpu::MemEntry>() * n_pages <= body_dma.len());
 
         let entries = unsafe {
-            let addr = transmute::<_, *mut commands::MemEntry>(body_dma.as_mut_ptr());
+            let addr = transmute::<_, *mut gpu::MemEntry>(body_dma.as_mut_ptr());
             slice_from_raw_parts_mut(addr, n_pages)
         };
 
         for i in 0..n_pages {
             let vaddr = &data[i * (PAGE_SIZE as usize)..];
             let paddr = mm_get_physical_address(vaddr.as_ptr() as _);
-            entries[i] = commands::MemEntry {
+            entries[i] = gpu::MemEntry {
                 addr: paddr,
                 length: PAGE_SIZE,
-                _padding: 0,
+                padding: 0,
             };
         }
 
@@ -441,7 +441,7 @@ impl Command {
     }
 
     pub fn attach_backing_virtual(chan: &GpuChannel, alloc: &Allocation, dma: &mut [u8]) -> Option<Self> {
-        const HEADER_SIZE: usize = size_of::<commands::ResourceAttachBacking>();
+        const HEADER_SIZE: usize = size_of::<gpu::ResourceAttachBacking>();
 
         let n_pages = alloc.num_attached_pages();
         if n_pages == 0 {
@@ -449,19 +449,19 @@ impl Command {
             return None;
         }
 
-        let hdr = commands::ResourceAttachBacking {
-            header: chan.new_header(commands::Command::RESOURCE_ATTACH_BACKING, true, None, None),
+        let hdr = gpu::ResourceAttachBacking {
+            header: chan.new_header(gpu::Command::RESOURCE_ATTACH_BACKING, true, None, None),
             resource_id: alloc.id().unwrap().get(),
             nr_entries: n_pages as _,
         };
 
-        let body_size = n_pages * size_of::<commands::MemEntry>();
+        let body_size = n_pages * size_of::<gpu::MemEntry>();
         let dma = &mut dma[..HEADER_SIZE+body_size];
         let (hdr_dma, body_dma) = dma.split_at_mut(HEADER_SIZE);
         hdr.write_to_prefix(hdr_dma).unwrap();
 
         let entries = unsafe {
-            let addr = transmute::<_, *mut commands::MemEntry>(body_dma.as_mut_ptr());
+            let addr = transmute::<_, *mut gpu::MemEntry>(body_dma.as_mut_ptr());
             slice_from_raw_parts_mut(addr, n_pages)
         };
 
@@ -474,14 +474,14 @@ impl Command {
     }
 
     pub fn detach_backing_dma_len() -> usize {
-        size_of::<commands::ResourceDetachBacking>()
+        size_of::<gpu::ResourceDetachBacking>()
     }
 
     pub fn detach_backing(chan: &GpuChannel, res_id: NonZero<u32>, dma: &mut [u8]) -> Self {
-        const CMD_SIZE: usize = size_of::<commands::ResourceUnmapBlob>();
+        const CMD_SIZE: usize = size_of::<gpu::ResourceDetachBacking>();
 
-        let cmd = commands::ResourceDetachBacking {
-            header: chan.new_header(commands::Command::RESOURCE_DETACH_BACKING, true, None, None),
+        let cmd = gpu::ResourceDetachBacking {
+            header: chan.new_header(gpu::Command::RESOURCE_DETACH_BACKING, true, None, None),
             resource_id: res_id.get(),
             _padding: 0,
         };
@@ -510,7 +510,7 @@ impl Command {
         match self.id {
             //CommandId::MapBlob => {
             //    let dma = unsafe { self.dma.as_mut().unwrap().as_mut() };
-            //    let cmd = commands::ResourceMapBlob::mut_from_prefix(dma).unwrap().0;
+            //    let cmd = gpu::ResourceMapBlob::mut_from_prefix(dma).unwrap().0;
             //    let res_id = NonZero::new(cmd.resource_id).unwrap();
             //    let alloc = allocation_from_res_id(allocations, res_id).unwrap();
             //
