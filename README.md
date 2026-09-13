@@ -30,6 +30,10 @@ export KEY="/path/to/cert/localhost-km.pfx"
 ./dist.sh
 ```
 
+## Gallery
+
+<img width="3026" height="1702" alt="demo" src="https://github.com/user-attachments/assets/8979a1b8-92c6-47d6-abdd-969d2a473a9a" />
+
 ## License
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
