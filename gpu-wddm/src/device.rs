@@ -9,6 +9,7 @@ use core::{
     iter::zip,
     mem::transmute,
     fmt,
+    fmt::Write,
 };
 
 use alloc::{
@@ -189,6 +190,7 @@ impl Device {
         let context = Context3D::try_new(self.chan.clone(), params.capset_id, params.debug_name())?;
         self.main_context.write().replace(context);
 
+
         if matches!(params.capset_id, CapsetId::Venus | CapsetId::Drm) {
             let capset_id = if supported_capsets.contains(CapsetMask::VIRGL2) {
                 CapsetId::Virgl2
@@ -196,7 +198,10 @@ impl Device {
                 CapsetId::Virgl
             };
 
-            self.virgl_blit_context.write().replace(Context3D::try_new(self.chan.clone(), capset_id, "venus-shadow-virgl-win32")?);
+            let mut buf = crate::logger::BufferWriter::<64>::default();
+            let _ = write!(buf, "shadow-virgl-{}", params.debug_name());
+
+            self.virgl_blit_context.write().replace(Context3D::try_new(self.chan.clone(), capset_id, buf.as_str())?);
         }
 
         debug!("{}: debug name {}, main {:?}, blit {:?}", function!(), params.debug_name(), self.main_context, self.virgl_blit_context);

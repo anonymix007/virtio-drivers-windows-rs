@@ -56,14 +56,16 @@ impl<T> TimeoutMutex<T> {
     }
 }
 
-#[repr(packed)]
-struct LogEntry {
+pub struct BufferWriter<const MAX_LEN: usize> {
     len: u16,
-    buf: [u8; 1022],
+    buf: [u8; MAX_LEN],
 }
+
+type LogEntry = BufferWriter<1022>;
+
 const _: () = assert!(size_of::<LogEntry>() == 1024);
 
-impl Default for LogEntry {
+impl<const MAX_LEN: usize> Default for BufferWriter<MAX_LEN> {
     fn default() -> Self {
         Self {
             len: 0,
@@ -72,7 +74,7 @@ impl Default for LogEntry {
     }
 }
 
-impl Write for LogEntry {
+impl<const MAX_LEN: usize> Write for BufferWriter<MAX_LEN> {
     fn write_str(&mut self, s: &str) -> Result<(), Error> {
         let free = &mut self.buf[self.len as usize..];
         let bytes = {
@@ -91,8 +93,8 @@ impl Write for LogEntry {
     }
 }
 
-impl LogEntry {
-    fn as_str(&self) -> &str {
+impl<const MAX_LEN: usize> BufferWriter<MAX_LEN> {
+    pub fn as_str(&self) -> &str {
         let bytes = &self.buf[..self.len as usize];
         str::from_utf8(&bytes).unwrap()
     }
