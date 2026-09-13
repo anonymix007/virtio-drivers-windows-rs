@@ -1269,15 +1269,19 @@ impl Adapter {
 
         let display_modes = chan.get_display_info()?;
 
-        let mut rects = [gpu::Rect { width: 0, height: 0, x: 0, y: 0}; 16];
         let mut flipq = [const { None }; 16];
         let addrs = [const { AtomicU64::new(0) }; 16];
         let vsync_enabled = AtomicBool::new(false);
         //let addrs = [const { (AtomicU64::new(0), AtomicPtr::new(null_mut())) }; 16];
 
+        let mut system_display_resolution = None;
+
         for scanout in 0..(num_scanouts as usize) {
             let edid = chan.get_edid(scanout as _)?;
-            let _ = map_virtio_error!(edid.preferred_resolution())?;
+            let preferred_resolution = map_virtio_error!(edid.preferred_resolution())?;
+            if scanout == 0 {
+                system_display_resolution = Some(preferred_resolution);
+            }
 
             let info = VidPnOutput::new(display_modes[scanout], edid);
 
@@ -1285,19 +1289,21 @@ impl Adapter {
             for (i, mode) in info.modes.iter().enumerate() {
                 debug!("mode {}: {:?}", i, mode);
             }
-            rects[scanout] = info.rect;
             flipq[scanout] = Some(info.flipq.clone());
             state.outputs[scanout] = Some(info);
         }
 
         state.empty_cursor = Some(Cursor::try_new(&chan, 64, 64, 0, 0, 0, 0)?);
 
+        debug!("{}: system display resolution: {:?}", function!(), system_display_resolution);
+
         // TODO: allocate Framebuffer for this
-        //if state.system_display_info.is_none() {
+        //if num_scanouts > 0 && state.system_display_info.is_none() {
+        //    let (w, h) = system_display_resolution.unwrap();
         //    state.system_display_info = Some(DXGK_DISPLAY_INFORMATION {
-        //        Width: rects[0].width as _,
-        //        Height: rects[0].height as _,
-        //        Pitch: (rects[0].width * 4) as _,
+        //        Width: w as _,
+        //        Height: h as _,
+        //        Pitch: (w * 4) as _,
         //        ColorFormat: D3DDDIFORMAT::D3DDDIFMT_X8R8G8B8,
         //        PhysicAddress: 0,
         //        TargetId: 0,
@@ -1310,7 +1316,6 @@ impl Adapter {
         if true {
 
         let flip_timer = FlipTimer::try_new(FlipTimerContext {
-            rects,
             addrs,
             flipq,
             vsync_enabled,

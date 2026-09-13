@@ -996,7 +996,6 @@ impl MonitorMode {
 }
 
 pub struct FlipTimerContext {
-    pub rects: [gpu::Rect; 16],
     pub addrs: [AtomicU64; 16],
     //pub addrs: [(AtomicU64, AtomicPtr<Allocation>); 16],
     pub flipq: [Option<Arc<ArrayQueue<(Weak<Allocation>, u64)>>>; 16],
@@ -1038,8 +1037,12 @@ impl FlipTimerContext {
                         continue;
                     };
 
+                    let rect = gpu::Rect {
+                       ...
+                    };
+
                     //let _ = wdk::wdm::ke_delay_execution_thread(wdk::wdm::NtTime::relative_ms(10));
-                    let _ = self.chan.resource_flush(res_id, self.rects[i]).inspect_err(|e|
+                    let _ = self.chan.resource_flush(res_id, rect).inspect_err(|e|
                         error!("{}: failed to flush resource: {:?}", function!(), e)
                     );
                 }
@@ -1076,11 +1079,20 @@ impl FlipTimerContext {
 
             //let _ = wdk::wdm::ke_delay_execution_thread(wdk::wdm::NtTime::relative_ms(10));
 
-            match alloc.resource() {
-                VirtioResource::_3D { .. } => {
-                    let _ = self.chan.set_scanout(self.rects[i], i as u32, res_id).inspect_err(|e|
+            let rect = match alloc.resource() {
+                VirtioResource::_3D { width, height, .. } => {
+                    let rect = gpu::Rect {
+                        x: 0,
+                        y: 0,
+                        width: *width,
+                        height: *height,
+                    };
+
+                    let _ = self.chan.set_scanout(rect, i as u32, res_id).inspect_err(|e|
                         error!("{}: failed to set scanout: {:?}", function!(), e)
                     );
+
+                    rect
                 },
                 VirtioResource::Blob { info, .. } => {
                     let Some(info) = *info.read() else {
@@ -1088,13 +1100,22 @@ impl FlipTimerContext {
                         continue;
                     };
 
-                    let _ = self.chan.set_scanout_blob(self.rects[i], i as u32, res_id, info).inspect_err(|e|
+                    let rect = gpu::Rect {
+                        x: 0,
+                        y: 0,
+                        width: info.width,
+                        height: info.height,
+                    };
+
+                    let _ = self.chan.set_scanout_blob(rect, i as u32, res_id, info).inspect_err(|e|
                         error!("{}: failed to set scanout: {:?}", function!(), e)
                     );
-                },
-            }
 
-            let _ = self.chan.resource_flush(res_id, self.rects[i]).inspect_err(|e|
+                    rect
+                },
+            };
+
+            let _ = self.chan.resource_flush(res_id, rect).inspect_err(|e|
                 error!("{}: failed to flush resource: {:?}", function!(), e)
             );
 
@@ -1410,7 +1431,6 @@ impl Cursor {
 }
 
 pub struct VidPnOutput {
-    pub rect: gpu::Rect,
     pub edid: Box<gpu::Edid>,
     pub current_mode: Option<usize>,
     pub modes: Vec<MonitorMode>,
@@ -1453,7 +1473,6 @@ impl VidPnOutput {
         let cursor = SpinMutex::new(None);
 
         Self {
-            rect: info.rect,
             current_mode,
             edid,
             modes,
@@ -1546,7 +1565,6 @@ impl VidPnOutput {
 impl fmt::Debug for VidPnOutput {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("VidPnOutput")
-            .field("rect", &self.rect)
             .field("modes", &self.modes)
             .field("current_mode", &self.current_mode.and_then(|m| Some(self.modes[m])))
             .field("flipq", &self.flipq)
