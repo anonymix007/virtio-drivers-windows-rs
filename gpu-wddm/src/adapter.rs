@@ -15,6 +15,7 @@ use core::{
             AtomicU64,
             AtomicPtr,
             AtomicBool,
+            AtomicUsize,
             Ordering,
         },
     },
@@ -369,11 +370,90 @@ const SUPPORTED_FEATURES: gpu::Features = gpu::Features::RING_EVENT_IDX
     .union(gpu::Features::RESOURCE_BLOB)
     .union(gpu::Features::CONTEXT_INIT);
 
-//#[derive(Clone)]
+#[derive(Debug)]
+struct BarMapping {
+    valid: AtomicBool,
+    phys: AtomicU64,
+    virt: AtomicPtr<u8>,
+    size: AtomicUsize,
+}
+
+impl BarMapping {
+    pub const fn none() -> Self {
+        Self {
+            valid: AtomicBool::new(false),
+            phys: AtomicU64::new(0),
+            virt: AtomicPtr::new(null_mut()),
+            size: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn map(&self, interface: &DxgkInterface, info: BarInfo) -> Result<(), NtStatus> {
+        debug!("{}: mapping BAR: {:?}", function!(), info);
+
+        match info {
+            BarInfo::Memory { address, size, ..} => {
+                let vaddr = interface.map_memory(address, size as u32, false, false, MEMORY_CACHING_TYPE::MmNonCached)?;
+                self.store_mapping(address, vaddr, size as usize);
+                Ok(())
+            },
+            BarInfo::IO { .. } => {
+                error!("TODO: map I/O bars");
+                Err(NtStatus(STATUS::NOT_IMPLEMENTED))
+            }
+        }
+    }
+
+    pub fn unmap(&self, interface: &DxgkInterface) -> Result<(), NtStatus> {
+        if self.valid.load(Ordering::Relaxed) {
+            self.valid.store(false, Ordering::Relaxed);
+            if let Some(vaddr) = NonNull::new(self.virt.load(Ordering::Relaxed)) {
+                interface.unmap_memory(vaddr)
+            } else {
+                warn!("{}: BAR is not mapped yet", function!());
+                Err(NtStatus(STATUS::INVALID_PARAMETER))
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    fn store_mapping(&self, phys: PhysAddr, virt: NonNull<u8>, size: usize) {
+        self.phys.store(phys, Ordering::Relaxed);
+        self.virt.store(virt.as_ptr(), Ordering::Relaxed);
+        self.size.store(size, Ordering::Relaxed);
+        self.valid.store(true, Ordering::Relaxed);
+    }
+
+    fn get_mapping_with_offset(&self, addr: PhysAddr, size: usize) -> Option<(NonNull<u8>, usize)> {
+        if !self.valid.load(Ordering::Relaxed) {
+            return None;
+        }
+
+        let bar_addr = self.phys.load(Ordering::Relaxed);
+        let bar_size = self.size.load(Ordering::Relaxed);
+        if (bar_addr..bar_addr + bar_size as u64).contains(&addr) {
+            let offset = (addr - bar_addr) as usize;
+
+            if offset + size > bar_size {
+                error!("offset {} with size {} is outside of bar size {}", offset, size, bar_size);
+                return None;
+            }
+
+            let virt = NonNull::new(self.virt.load(Ordering::Relaxed))?;
+            Some((virt, offset))
+        } else {
+            None
+        }
+    }
+}
+
+static MAPPED_BARS: [BarMapping; 6] = [const { BarMapping::none() }; 6];
+
 pub struct DxgkInterface {
     interface: UnsafeCell<DXGKRNL_INTERFACE>,
     device_function: DeviceFunction,
-    pci_bars: [Option<(BarInfo, Option<NonNull<u8>>)>; 6],
+    pci_bars: [Option<BarInfo>; 6],
     unsafe_copy: bool,
 }
 
@@ -428,25 +508,12 @@ impl DxgkInterface {
         dxgk_call!(<= PROFILE_LEVEL | self.DxgkCbQueueDpc()) != 0
     }
 
-    fn find_bar(&self, addr: u64) -> Option<(u8, u64)> {
-        for b in 0..self.pci_bars.len() {
-            let Some((BarInfo::Memory { address, size, .. }, _)) = self.pci_bars[b] else {
-                continue;
-            };
-            if (address..address + size).contains(&addr) {
-                let offset = addr - address;
-                return Some((b as _, offset));
-            }
-        }
-        None
-    }
-
     pub fn get_physical_bar_address(&self, bar: u8) -> Option<PhysAddr> {
         let bar = bar as usize;
         if bar < self.pci_bars.len() {
-            if let Some((BarInfo::Memory { address, .. }, _)) = self.pci_bars[bar] {
+            if let Some(BarInfo::Memory { address, .. }) = self.pci_bars[bar] {
                 return Some(address);
-            } else if let Some((BarInfo::IO { .. }, _)) = self.pci_bars[bar] {
+            } else if let Some(BarInfo::IO { .. }) = self.pci_bars[bar] {
                 error!("TODO: physical address for I/O bars");
                 return None;
             }
@@ -456,6 +523,7 @@ impl DxgkInterface {
         None
     }
 
+    /*
     fn get_mapped_bar_address(&self, bar: u8) -> Option<(NonNull<u8>, usize)> {
         let bar = bar as usize;
         if bar < self.pci_bars.len() {
@@ -481,6 +549,7 @@ impl DxgkInterface {
         error!("invalid bar {}", bar);
         None
     }
+    */
 
     fn notify_dpc(&self) {
         dxgk_call!(== DISPATCH_LEVEL | self.DxgkCbNotifyDpc());
@@ -734,18 +803,15 @@ impl Drop for DxgkInterface {
             warn!("{}: dropping unsafe copy of dxgk interface", function!());
             return;
         }
-        for bar in self.pci_bars {
-            if let Some((BarInfo::Memory { .. }, addr)) = bar {
-                if let Some(addr) = addr {
-                    let _ = self.unmap_memory(addr).map_err(|e| {
-                        error!("failed to unmap memory: {:?}", e);
-                        e
-                    });
-                }
-            } else if let Some((BarInfo::IO { .. }, addr)) = bar {
-                if let Some(_) = addr {
+        for (bar_info, mapped) in core::iter::zip(self.pci_bars, MAPPED_BARS.iter()) {
+            match bar_info {
+                None => {},
+                Some(BarInfo::Memory { .. }) => {
+                    let _ = mapped.unmap(&self).inspect_err(|e| error!("failed to unmap memory: {:?}", e));
+                },
+                Some(BarInfo::IO { .. }) => {
                     error!("TODO: unmap I/O bars");
-                }
+                },
             }
         }
     }
@@ -779,51 +845,26 @@ unsafe impl Hal for DxgkInterface {
         0
     }
 
-    unsafe fn mmio_phys_to_virt(&self, paddr: PhysAddr, size: usize) -> NonNull<u8> {
+    unsafe fn mmio_phys_to_virt(paddr: PhysAddr, size: usize) -> NonNull<u8> {
         let phys = PHYSICAL_ADDRESS { QuadPart: paddr as _ };
 
-        if let Some((bar, offset)) = self.find_bar(paddr) {
-            let Some((vaddr, bar_size)) = self.get_mapped_bar_address(bar) else {
-                error!("failed to get mapped bar address");
-                return unsafe { NonNull::new_unchecked(1 as *mut u8) };
+        for (i, bar) in MAPPED_BARS.iter().enumerate() {
+            let Some((vaddr, offset)) = bar.get_mapping_with_offset(paddr, size) else {
+                continue;
             };
-            if offset as usize + size > bar_size {
-                error!("offset {} with size {} is outside of bar {} size {}", offset, size, bar, bar_size);
-                return unsafe { NonNull::new_unchecked(1 as *mut u8) };
-            }
+            debug!("addr {:x} is in bar {} at offset {}", paddr, i, offset);
+            return unsafe { vaddr.offset(offset as _) };
+        }
 
-            debug!("addr {:x} is in bar {} at offset {}", paddr, bar, offset);
+        warn!("addr {:x} is not a BAR address", paddr);
 
-            unsafe { vaddr.offset(offset as _) }
-        } else if let Some(vaddr) = NonNull::new(unsafe { MmGetVirtualForPhysical(phys) } as _) {
+        if let Some(vaddr) = NonNull::new(unsafe { MmGetVirtualForPhysical(phys) } as _) {
             debug!("phys addr {:x} is at virt: {:?}", paddr, vaddr);
             vaddr
         } else {
             error!("failed get virtual address for physical {:x?}", paddr);
             unsafe { NonNull::new_unchecked(1 as *mut u8) }
         }
-
-        /*if let Some(vaddr) = NonNull::new(unsafe { MmGetVirtualForPhysical(phys) } as _) {
-            debug!("phys addr {:x} is at virt: {:?}", paddr, vaddr);
-            vaddr
-        } else {
-            let Some((bar, offset)) = self.find_bar(paddr) else {
-                panic!("cannot convert arbitrary (non-bar) physical memory to virtual: {:x?}", paddr);
-                //return unsafe { NonNull::new_unchecked(1 as *mut u8) };
-            };
-            let Some((vaddr, bar_size)) = self.get_mapped_bar_address(bar) else {
-                panic!("failed to get mapped bar address");
-                //return unsafe { NonNull::new_unchecked(1 as *mut u8) };
-            };
-            if offset as usize + size > bar_size {
-                panic!("offset {} with size {} is outside of bar {} size {}", offset, size, bar, bar_size);
-                //return unsafe { NonNull::new_unchecked(1 as *mut u8) };
-            }
-
-            debug!("addr {:x} is in bar {} at offset {}", paddr, bar, offset);
-
-            return unsafe { vaddr.offset(offset as _) };
-        }*/
     }
 
     unsafe fn share(buffer: NonNull<[u8]>, _direction: BufferDirection, _access_platform: bool) -> PhysAddr {
@@ -1135,11 +1176,27 @@ impl Adapter {
 
         let mut pci_root = PciRoot::new(interface);
 
-        let pci_bars = map_virtio_pci_error!(pci_root.bars(device_function))?.map(|b| b.map(|b| (b, None)));
+        let pci_bars = map_virtio_pci_error!(pci_root.bars(device_function))?;
 
         for i in 0..pci_bars.len() {
-            if let Some((bar, _)) = &pci_bars[i] {
-                debug!("found bar {}: {}", i, bar);
+            if pci_bars[i].is_none() {
+                continue;
+            }
+
+            let bar = pci_bars[i].clone().unwrap();
+
+            debug!("found bar {}: {}", i, bar);
+
+            let size = match bar {
+                BarInfo::Memory { size, .. } => size,
+                BarInfo::IO { size, .. } => size as u64,
+            };
+
+            // virtio-drivers' PCI transport seems to only ever access bar 2 which is 16k
+            // bar 0 (vga) and bar 4 (shmem) are unused (and both are considerably bigger than 32k)
+            // bar 1 seems to be unused, but might as well also map it, it's just 4k anyway
+            if size <= 32768 {
+                MAPPED_BARS[i].map(&pci_root.configuration_access, bar)?;
             }
         }
 
@@ -1155,7 +1212,7 @@ impl Adapter {
 
         info!("vendor id = 0x{:04X}, device id = 0x{:04X}", pci_common.VendorID, pci_common.DeviceID);
 
-        let mut pci_transport = map_virtio_pci_error!(PciTransport::new(&mut pci_root, device_function))?;
+        let mut pci_transport = map_virtio_pci_error!(PciTransport::new::<DxgkInterface, _>(&mut pci_root, device_function))?;
 
         let Some(shmem) = pci_transport.shmem() else {
             error!("no shared memory support");

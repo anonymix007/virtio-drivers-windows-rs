@@ -1,4 +1,5 @@
 //! Driver for VirtIO GPU devices.
+#![allow(missing_docs)]
 
 mod edid;
 
@@ -35,6 +36,7 @@ const SUPPORTED_FEATURES: Features = Features::RING_EVENT_IDX
     .union(Features::CONTEXT_INIT)
     .union(Features::RESOURCE_BLOB);
 
+/// VirtIO-GPU host-visible shmem window identifier
 pub const VIRTIO_GPU_SHM_ID_HOST_VISIBLE: u8 = 1;
 
 /// A virtio based graphics adapter.

@@ -111,7 +111,7 @@ impl PciTransport {
     /// root controller.
     ///
     /// The PCI device must already have had its BARs allocated.
-    pub fn new<C: ConfigurationAccess + Hal>(
+    pub fn new<H: Hal, C: ConfigurationAccess>(
         root: &mut PciRoot<C>,
         device_function: DeviceFunction,
     ) -> Result<Self, VirtioPciError> {
@@ -199,7 +199,7 @@ impl PciTransport {
             }
         }
 
-        let common_cfg = get_bar_region::<_, _>(
+        let common_cfg = get_bar_region::<H, _, _>(
             root,
             device_function,
             &common_cfg.ok_or(VirtioPciError::MissingCommonConfig)?,
@@ -214,12 +214,12 @@ impl PciTransport {
                 notify_off_multiplier,
             ));
         }
-        let notify_region = get_bar_region_slice::<_, _>(root, device_function, &notify_cfg)?;
+        let notify_region = get_bar_region_slice::<H, _, _>(root, device_function, &notify_cfg)?;
         // SAFETY: `get_bar_region` should always return a valid MMIO region, assuming the PCI root
         // is behaving.
         let notify_region = unsafe { UniqueMmioPointer::new(notify_region) };
 
-        let isr_status = get_bar_region::<_, _>(
+        let isr_status = get_bar_region::<H, _, _>(
             root,
             device_function,
             &isr_cfg.ok_or(VirtioPciError::MissingIsrConfig)?,
@@ -232,7 +232,7 @@ impl PciTransport {
             // SAFETY: `get_bar_region_slice` should always return a valid MMIO region, assuming the
             // PCI root is behaving.
             Some(unsafe {
-                UniqueMmioPointer::new(get_bar_region_slice::<_, _>(
+                UniqueMmioPointer::new(get_bar_region_slice::<H, _, _>(
                     root,
                     device_function,
                     &device_cfg,
@@ -254,6 +254,7 @@ impl PciTransport {
         })
     }
 
+    /// Returns GPU shmem region if exists
     pub fn shmem(&self) -> Option<VirtioCapabilityInfo> {
         self.shmem_gpu_cfg.clone()
     }
@@ -458,7 +459,7 @@ pub struct VirtioCapabilityInfo {
     pub length: u64,
 }
 
-fn get_bar_region<T, C: ConfigurationAccess + Hal>(
+fn get_bar_region<H: Hal, T, C: ConfigurationAccess>(
     root: &mut PciRoot<C>,
     device_function: DeviceFunction,
     struct_info: &VirtioCapabilityInfo,
@@ -479,10 +480,7 @@ fn get_bar_region<T, C: ConfigurationAccess + Hal>(
     }
     let paddr = bar_address as PhysAddr + struct_info.offset as PhysAddr;
     // SAFETY: The paddr and size describe a valid MMIO region, at least according to the PCI bus.
-    let vaddr = unsafe {
-        root.configuration_access
-            .mmio_phys_to_virt(paddr, struct_info.length as usize)
-    };
+    let vaddr = unsafe { H::mmio_phys_to_virt(paddr, struct_info.length as usize) };
     if !(vaddr.as_ptr() as usize).is_multiple_of(align_of::<T>()) {
         return Err(VirtioPciError::Misaligned {
             address: vaddr.as_ptr() as usize,
@@ -492,12 +490,12 @@ fn get_bar_region<T, C: ConfigurationAccess + Hal>(
     Ok(vaddr.cast())
 }
 
-fn get_bar_region_slice<T, C: ConfigurationAccess + Hal>(
+fn get_bar_region_slice<H: Hal, T, C: ConfigurationAccess>(
     root: &mut PciRoot<C>,
     device_function: DeviceFunction,
     struct_info: &VirtioCapabilityInfo,
 ) -> Result<NonNull<[T]>, VirtioPciError> {
-    let ptr = get_bar_region::<T, C>(root, device_function, struct_info)?;
+    let ptr = get_bar_region::<H, T, C>(root, device_function, struct_info)?;
     Ok(NonNull::slice_from_raw_parts(
         ptr,
         struct_info.length as usize / size_of::<T>(),

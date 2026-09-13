@@ -46,6 +46,7 @@
 #![deny(
     unsafe_op_in_unsafe_fn,
     unused_must_use,
+    missing_docs,
     clippy::undocumented_unsafe_blocks
 )]
 #![allow(clippy::identity_op)]
