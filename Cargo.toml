@@ -6,7 +6,7 @@ members = ["gpu-wddm", "wdk"]
 
 [workspace.package]
 edition = "2024"
-license = "CC BY-NC-SA"
+license = "AGPL-3.0-or-later"
 
 [workspace.dependencies]
 bindgen = "0.72.1"
