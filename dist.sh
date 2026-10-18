@@ -68,4 +68,4 @@ makecat --os-attr "2:10.0" --os "$WINVER" --hwid "$HWID" --output $DIST/$NAME.ca
 osslsigncode sign -key $KEY -certs $CERT $DIST/$NAME.cat-unsigned $DIST/$NAME.cat
 rm $DIST/$NAME.cat-unsigned
 cp $DRIVER.pdb $DIST/
-cp $MESA/*.debug $DIST/
+cp $MESA/*.debug $DIST/ || echo "No split debug files"
