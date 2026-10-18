@@ -1635,50 +1635,21 @@ impl Adapter {
                 trace!("{}: res info for allocation {:?}", function!(), alloc);
 
                 let id = alloc.id().ok_or(STATUS::UNSUCCESSFUL)?.get();
-                let resource = alloc.resource().clone();
 
-                // TODO: virgl needs to query resources BEFORE context init
-                let layout = if
-                    alloc.is_3d() &&
-                    unsafe { res_info.info._3d.modifier == DRM_FORMAT_MOD_INVALID } &&
+                if
+                    alloc.is_3d() && res_info.info.modifier == DRM_FORMAT_MOD_INVALID &&
                     let Some(device) = <Device as TaggedExt>::from_arc_handle_clone(escape.hDevice)
                 {
-                    alloc.query_layout(device)?
-                } else {
-                    None
-                }.unwrap_or(VirglResourceLayout {
-                    modifier: DRM_FORMAT_MOD_INVALID,
-                    ..unsafe { zeroed() }
-                });
+                    let _ = alloc.query_layout(device, None)?;
+                }
 
-                res_info.id = id;
+                let resource = alloc.resource().clone();
                 res_info.info = resource.into();
-
-                match res_info.info.tag() {
-                    ALLOCATE_3D_TAG => {
-                        let info_3d = unsafe { &mut res_info.info._3d };
-
-                        info_3d.modifier = layout.modifier;
-                        info_3d.num_planes = layout.num_planes;
-
-                        for (i, plane) in layout.planes[0..layout.num_planes as usize].iter().enumerate() {
-                            info_3d.offsets[i] = plane.offset;
-                            info_3d.strides[i] = plane.stride;
-                            info_3d.sizes[i] = plane.size;
-                        }
-
-                        //warn!("{}: alloc: ({}, {:?})", function!(), alloc.id().unwrap(), layout);
-
-                        debug!("{}: returning {:?}", function!(), info_3d);
-                    },
-                    ALLOCATE_BLOB_TAG => {
-                        debug!("{}: returning {:?}", function!(), unsafe { &res_info.info.blob });
-                    },
-                    _ => unreachable!(),
-                };
+                res_info.info.res_id = id;
 
                 Ok(())
             },
+
 
             ESCAPE_RESOURCE_BUSY_TAG => {
                 let res_busy = check_buffer_size!(escape.pPrivateDriverData, escape.PrivateDriverDataSize, ResourceBusy)?;
@@ -1728,6 +1699,7 @@ impl Adapter {
             },
             */
 
+            /*
             ESCAPE_BLOB_INFO_SET_TAG => {
                 let blob_set = check_buffer_size!(escape.pPrivateDriverData, escape.PrivateDriverDataSize, BlobInfoSet)?;
                 trace!("{}: blob set info: {:?}", function!(), blob_set);
@@ -1738,6 +1710,7 @@ impl Adapter {
 
                 Ok(())
             },
+            */
 
             ESCAPE_BLOB_MAP_TAG => {
                 trace!("{}: map blob", function!());
@@ -2420,7 +2393,7 @@ impl Adapter {
 
         let allocation = match alloc_priv.tag() {
             ALLOCATE_BLOB_TAG => {
-                let alloc_blob = unsafe { &alloc_priv.blob };
+                let alloc_blob = unsafe { &alloc_priv.base.blob };
 
                 if { alloc_blob.flags } == BlobFlag::NONE {
                     warn!("{}: creating blob {} with no flags will probably fail", function!(), { alloc_blob.id });
@@ -2432,7 +2405,18 @@ impl Adapter {
                 }
 
                 let resource_id = chan.next_resource_id().ok_or(STATUS::NO_MEMORY)?;
-                let allocation = Arc::try_new(Allocation::new(resource_id, submit_3d, *alloc_blob)?)?;
+
+                let layout = if alloc_blob.info.is_valid() {
+                    Some(BlobLayout {
+                        info: alloc_blob.info,
+                        num_planes: alloc_priv.num_planes,
+                        modifier: alloc_priv.modifier,
+                        planes: alloc_priv.planes,
+                    })
+                } else {
+                    None
+                };
+                let allocation = Arc::try_new(Allocation::new(resource_id, submit_3d, (*alloc_blob, layout))?)?;
                 //debug!("{}: allocated blob: {:?}", function!(), allocation);
 
                 alloc_info.PreferredSegment.set_SegmentId0(MemorySegment::BlobHost3D as _);
@@ -2467,7 +2451,7 @@ impl Adapter {
                 Ok(allocation)
             },
             ALLOCATE_3D_TAG => {
-                let alloc_3d = unsafe { &alloc_priv._3d };
+                let alloc_3d = unsafe { &alloc_priv.base._3d };
 
                 let resource_id = chan.resource_create_3d(alloc_3d)?;
 
@@ -2491,6 +2475,8 @@ impl Adapter {
             },
         }?;
 
+        alloc_priv.res_id = allocation.id().map_or(0, NonZero::get);
+
         /*
         if create_allocation.Flags.Resource() {
             create_allocation.hResource = TaggedExt::into_arc_handle(Resource::new(&allocation)?);
@@ -2507,6 +2493,8 @@ impl Adapter {
         if create_allocation.Flags.Resource() {
             create_allocation.hResource = handle;
         }
+
+        //warn!("{}: alloc priv: {:?}", function!(), alloc_priv);
 
         Ok(())
     }

@@ -207,6 +207,14 @@ impl fmt::Debug for AtomicBlobInfo {
     }
 }*/
 
+#[derive(Debug, Copy, Clone)]
+pub struct BlobLayout {
+    pub info: BlobInfo,
+    pub num_planes: u32,
+    pub modifier: u64,
+    pub planes: [PlaneLayout; 4],
+}
+
 #[derive(Debug)]
 pub enum VirtioResource {
     _3D {
@@ -228,7 +236,7 @@ pub enum VirtioResource {
         id: u64,
         mem: BlobMem,
         flags: BlobFlag,
-        info: RwLock<Option<BlobInfo>>,
+        layout: RwLock<Option<BlobLayout>>,
         map: RwLock<Option<offset_allocator::Allocation>>,
         size: u64,
     },
@@ -276,17 +284,17 @@ impl Clone for VirtioResource {
                 id,
                 mem,
                 flags,
-                info,
+                layout,
                 map,
                 size,
             } => {
-                let info_val = *info.read();
+                let layout_val = *layout.read();
                 let map_val = *map.read();
                 VirtioResource::Blob {
                     id: *id,
                     mem: *mem,
                     flags: *flags,
-                    info: RwLock::new(info_val),
+                    layout: RwLock::new(layout_val),
                     map: RwLock::new(map_val),
                     size: *size,
                 }
@@ -315,13 +323,15 @@ impl From<Allocate3d> for VirtioResource {
     }
 }
 
-impl From<AllocateBlob> for VirtioResource {
-    fn from(info: AllocateBlob) -> Self {
+impl From<(AllocateBlob, Option<BlobLayout>)> for VirtioResource {
+    fn from(info: (AllocateBlob, Option<BlobLayout>) ) -> Self {
+        let (info, layout) = info;
+
         Self::Blob {
             id: info.id,
             mem: info.mem,
             flags: info.flags,
-            info: RwLock::new(None),
+            layout: RwLock::new(layout),
             map: RwLock::new(None),
             size: info.size,
         }
@@ -330,8 +340,8 @@ impl From<AllocateBlob> for VirtioResource {
 
 pub const DRM_FORMAT_MOD_INVALID: u64 = 0x00FFFFFFFFFFFFFF;
 
-impl Into<AllocationInfo> for VirtioResource {
-    fn into(self) -> AllocationInfo {
+impl Into<CreateAllocation> for VirtioResource {
+    fn into(self) -> CreateAllocation {
         match self {
             VirtioResource::_3D {
                 target,
@@ -356,8 +366,8 @@ impl Into<AllocationInfo> for VirtioResource {
                         ..unsafe { core::mem::zeroed() }
                     }
                 };
-                AllocationInfo {
-                    _3d: Allocate3dFull {
+                CreateAllocation {
+                    base: CreateAllocationInfo {
                        _3d: Allocate3d {
                            tag: ALLOCATE_3D_TAG,
                            target: target.into(),
@@ -372,61 +382,56 @@ impl Into<AllocationInfo> for VirtioResource {
                            flags: flags.bits(),
                            size: size,
                        },
-                       modifier: layout.modifier,
-                       offsets: {
-                           let mut offsets = [0; _];
-
-                           for i in 0..layout.num_planes as usize {
-                               offsets[i] = layout.planes[i].offset;
-                           }
-
-                           offsets
-                       },
-                       strides: {
-                           let mut strides = [0; _];
-
-                           for i in 0..layout.num_planes as usize {
-                               strides[i] = layout.planes[i].stride;
-                           }
-
-                           strides
-                       },
-                       sizes: {
-                           let mut sizes = [0; _];
-
-                           for i in 0..layout.num_planes as usize {
-                               sizes[i] = layout.planes[i].size;
-                           }
-
-                           sizes
-                       },
-                       num_planes: layout.num_planes,
                    },
+                   res_id: 0,
+                   num_planes: layout.num_planes,
+                   modifier: layout.modifier,
+                   planes: layout.planes.map(|plane| PlaneLayout {
+                      offset: plane.offset as u64,
+                      stride: plane.stride as u64,
+                      size: plane.size as u64,
+                   }),
                 }
             },
             VirtioResource::Blob {
                 id,
                 mem,
                 flags,
-                info,
+                layout,
                 map,
                 size,
-            } => AllocationInfo {
-                blob: AllocateBlobFull {
-                    blob: AllocateBlob {
-                        tag: ALLOCATE_BLOB_TAG,
-                        id,
-                        mem,
-                        flags,
-                        size,
+            } => {
+                let layout = (*layout.read()).unwrap_or(BlobLayout {
+                    info: BlobInfo {
+                        width: 0,
+                        height: 0,
+                        format: 0,
+                        bind: 0,
                     },
-                    info: if let Some(info) = *info.read() {
-                        info
-                    } else {
-                        unsafe { core::mem::zeroed() }
+                    num_planes: 0,
+                    modifier: DRM_FORMAT_MOD_INVALID,
+                    planes: [PlaneLayout {
+                        offset: 0,
+                        stride: 0,
+                        size: 0,
+                    }; 4],
+                });
+
+                CreateAllocation {
+                    base: CreateAllocationInfo {
+                        blob: AllocateBlob {
+                            tag: ALLOCATE_BLOB_TAG,
+                            id,
+                            mem,
+                            flags,
+                            size,
+                            info: layout.info,
+                        },
                     },
-                    info_valid: info.read().is_some(),
-                    created: true,
+                    res_id: 0,
+                    num_planes: layout.num_planes,
+                    modifier: layout.modifier,
+                    planes: layout.planes,
                 }
             },
         }
@@ -770,17 +775,17 @@ impl Allocation {
         }
     }
 
-    pub fn set_blob_info(&self, blob_info: BlobInfo) -> Option<()> {
+    /*pub fn set_blob_info(&self, blob_layout: BlobLayout) -> Option<()> {
         match &self.resource {
             VirtioResource::_3D {..} => {
                 None
             },
-            VirtioResource::Blob {info, ..} => {
-                info.write().replace(blob_info);
+            VirtioResource::Blob {layout, ..} => {
+                layout.write().replace(blob_layout);
                 Some(())
             },
         }
-    }
+    }*/
 
     pub fn attach_to_device(self: Arc<Self>, device: Arc<Device>, owned: bool) -> Result<Arc<DeviceSpecificAllocation>, NtStatus> {
         let mut attached = self.device_specific.lock();
@@ -848,15 +853,15 @@ impl Allocation {
                     format,
                 })
             },
-            VirtioResource::Blob {info, ..} => {
-                let Some(info) = *info.read() else {
-                    error!("{}: blob info is missing", function!());
+            VirtioResource::Blob {layout, ..} => {
+                let Some(layout) = *layout.read() else {
+                    error!("{}: blob layout is missing", function!());
                     return Err(NtStatus(STATUS::UNSUCCESSFUL));
                 };
 
-                let width = info.width;
-                let height = info.height;
-                let format = VirglFormat::from(info.format).into();
+                let width = layout.info.width;
+                let height = layout.info.height;
+                let format = VirglFormat::from(layout.info.format).into();
 
                 Ok(AllocationDesc {
                     width,
@@ -1105,7 +1110,7 @@ impl Allocation {
         }
     }
 
-    pub fn query_layout(self: &Arc<Allocation>, device: Arc<Device>) -> Result<Option<VirglResourceLayout>, NtStatus> {
+    pub fn query_layout(self: &Arc<Allocation>, device: Arc<Device>, device_specific: Option<Arc<DeviceSpecificAllocation>>) -> Result<Option<VirglResourceLayout>, NtStatus> {
         match &self.resource {
             VirtioResource::_3D { layout, .. } => {
                 if let Some(layout) = *layout.read() {
@@ -1118,7 +1123,8 @@ impl Allocation {
             }
         }
 
-        match device.query_layout(&self) {
+        let device_specific = device_specific.map_or_else(|| self.clone().attach_to_device(device.clone(), false), Ok)?;
+        match device.query_layout(&device_specific) {
             Ok(layout_) => {
                 match &self.resource {
                     VirtioResource::_3D { layout, .. } => {

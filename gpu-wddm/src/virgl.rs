@@ -8,7 +8,7 @@ use zerocopy::*;
 use wdk::dxgkrnl::D3DDDIFORMAT;
 
 use crate::function;
-use crate::uapi::BlobInfo;
+use crate::allocation::BlobLayout;
 
 pub const VIRGL_FORMAT_NONE: u32 = 0;
 pub const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
@@ -1283,8 +1283,9 @@ impl VirglResourceSetType {
         ])
     }
 
-    pub const fn from_blob_info(id: u32, info: &BlobInfo) -> Self {
-        Self::new(id, info.format, info.bind, info.width, info.height, /* info.usage */ 0, info.modifier, info.strides[0], info.offsets[0])
+    pub const fn from_blob_layout(id: u32, layout: &BlobLayout) -> Self {
+        assert!(layout.num_planes == 1);
+        Self::new(id, layout.info.format, layout.info.bind, layout.info.width, layout.info.height, /* info.usage */ 0, layout.modifier, layout.planes[0].stride as u32, layout.planes[0].offset as u32)
     }
 }
 

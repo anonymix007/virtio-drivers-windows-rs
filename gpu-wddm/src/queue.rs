@@ -2202,18 +2202,18 @@ impl GpuChannel {
         Ok(())
     }
 
-    pub fn set_scanout_blob(&self, rect: gpu::Rect, scanout: u32, res_id: NonZero<u32>, info: BlobInfo) -> Result<(), NtStatus> {
+    pub fn set_scanout_blob(&self, rect: gpu::Rect, scanout: u32, res_id: NonZero<u32>, layout: BlobLayout) -> Result<(), NtStatus> {
         let cmd = gpu::SetScanoutBlob {
             header: self.new_header(gpu::Command::SET_SCANOUT_BLOB, false, None, None),
             rect,
             scanout_id: scanout,
             resource_id: res_id.get(),
-            width: info.width,
-            height: info.height,
-            format: info.format,
+            width: layout.info.width,
+            height: layout.info.height,
+            format: layout.info.format,
             _padding: 0,
-            strides: info.strides,
-            offsets: info.offsets,
+            strides: layout.planes.map(|plane| plane.stride as u32),
+            offsets: layout.planes.map(|plane| plane.offset as u32),
         };
 
         // FIXME: we cannot really do blocking stuff here. Timer callbacks seem to be called with an IRQL that is too high

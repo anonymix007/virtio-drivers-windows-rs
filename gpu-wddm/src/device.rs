@@ -251,12 +251,11 @@ impl Device {
         }
     }
 
-    pub fn query_layout(self: Arc<Device>, alloc: &Arc<Allocation>) -> Result<VirglResourceLayout, NtStatus> {
+    pub fn query_layout(self: &Device, device_specific: &Arc<DeviceSpecificAllocation>) -> Result<VirglResourceLayout, NtStatus> {
         let ctx_id = self.context_internal(true).ok_or(STATUS::REINITIALIZATION_NEEDED)?.0;
-        let device_specific = Allocation::attach_to_device(alloc.clone(), self.clone(), false)?;
         device_specific.ensure_virgl_attached()?;
 
-        let target = alloc.id().unwrap();
+        let target = device_specific.alloc.upgrade().unwrap().id().unwrap();
 
         let mut query = self.query_buffer.lock();
         let query = if let Some(query) = query.as_ref() {
@@ -389,12 +388,12 @@ impl Device {
             }
 
             let id = src_alloc.id().unwrap();
-            if let VirtioResource::Blob { info, .. } = src_alloc.resource() && let Some(info) = *info.read() {
-                let cmd = Command::virgl_set_type(&self.chan, Some(context_id), id, &info, None, &mut dmabuf[dmabuf_offset..]);
+            if let VirtioResource::Blob { layout, .. } = src_alloc.resource() && let Some(layout) = *layout.read() {
+                let cmd = Command::virgl_set_type(&self.chan, Some(context_id), id, &layout, None, &mut dmabuf[dmabuf_offset..]);
                 dmabuf_offset += cmd.len();
                 dma_priv.commands.push(cmd);
             } else {
-                error!("{}: no blob info set for {:?}", function!(), src_alloc);
+                error!("{}: no blob layout set for {:?}", function!(), src_alloc);
             }
         }
         if dst_alloc.is_blob() {
@@ -407,12 +406,12 @@ impl Device {
             }
 
             let id = dst_alloc.id().unwrap();
-            if let VirtioResource::Blob { info, .. } = src_alloc.resource() && let Some(info) = *info.read() {
-                let cmd = Command::virgl_set_type(&self.chan, Some(context_id), id, &info, None, &mut dmabuf[dmabuf_offset..]);
+            if let VirtioResource::Blob { layout, .. } = dst_alloc.resource() && let Some(layout) = *layout.read() {
+                let cmd = Command::virgl_set_type(&self.chan, Some(context_id), id, &layout, None, &mut dmabuf[dmabuf_offset..]);
                 dmabuf_offset += cmd.len();
                 dma_priv.commands.push(cmd);
             } else {
-                error!("{}: no blob info set for {:?}", function!(), dst_alloc);
+                error!("{}: no blob layout set for {:?}", function!(), dst_alloc);
             }
         }
 
@@ -845,7 +844,30 @@ impl Device {
             //}
 
             debug!("Opening allocation: {:?}", alloc);
-            let device_specific = alloc.attach_to_device(self.clone(), false)?;
+            let device_specific = alloc.clone().attach_to_device(self.clone(), false)?;
+
+            let alloc_priv = crate::check_buffer_size!(alloc_info.pPrivateDriverData, alloc_info.PrivateDriverDataSize, CreateAllocation)?;
+            if flags.Create() {
+                if alloc.is_3d() {
+                    match alloc.query_layout(self.clone(), Some(device_specific.clone())) {
+                        Ok(Some(layout)) => {
+                            alloc_priv.num_planes = layout.num_planes;
+                            alloc_priv.modifier = layout.modifier;
+                            alloc_priv.planes = layout.planes.map(|plane| PlaneLayout {
+                               offset: plane.offset as u64,
+                               stride: plane.stride as u64,
+                               size: plane.size as u64,
+                            });
+                        },
+                        Ok(None) => warn!("{}: failed to query resource layout: no layout: {:?}", function!(), alloc),
+                        Err(e) => warn!("{}: failed to query resource layout: {:?}", function!(), e),
+                    }
+                }
+                alloc_priv.res_id = alloc.id().map_or(0, NonZero::get);
+            }
+
+            //warn!("{}: alloc priv: {:?}", function!(), alloc_priv);
+
             alloc_info.hDeviceSpecificAllocation = TaggedExt::into_arc_handle(device_specific);
         }
 

@@ -181,7 +181,7 @@ impl Command {
         size_of::<gpu::CmdSubmit3D>() + size_of::<VirglResourceSetType>()
     }
 
-    pub fn virgl_set_type(chan: &GpuChannel, context_id: Option<NonZero<u32>>, id: NonZero<u32>, info: &BlobInfo, ring: Option<u8>, dma: &mut [u8]) -> Self {
+    pub fn virgl_set_type(chan: &GpuChannel, context_id: Option<NonZero<u32>>, id: NonZero<u32>, layout: &BlobLayout, ring: Option<u8>, dma: &mut [u8]) -> Self {
         const HEADER_SIZE: usize = size_of::<gpu::CmdSubmit3D>();
         const BODY_SIZE:   usize = size_of::<VirglResourceSetType>();
 
@@ -196,7 +196,7 @@ impl Command {
 
         hdr.write_to_prefix(hdr_dma).unwrap();
 
-        let cmd = VirglResourceSetType::from_blob_info(id.get(), info);
+        let cmd = VirglResourceSetType::from_blob_layout(id.get(), layout);
 
         cmd.write_to_prefix(body_dma).unwrap();
 

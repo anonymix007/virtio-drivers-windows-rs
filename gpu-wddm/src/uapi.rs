@@ -82,7 +82,7 @@ pub const ESCAPE_CAPSET_TAG:          u64 = 0x5350414343534556u64;
 //pub const ESCAPE_PCIE_TAG:            u64 = 0x4943505043534556u64;
 pub const ESCAPE_RESOURCE_INFO_TAG:   u64 = 0x464E495243534556u64;
 pub const ESCAPE_RESOURCE_BUSY_TAG:   u64 = 0x5355425243534556u64;
-pub const ESCAPE_BLOB_INFO_SET_TAG:   u64 = 0x424F4C4243534556u64;
+//pub const ESCAPE_BLOB_INFO_SET_TAG:   u64 = 0x424F4C4243534556u64;
 pub const ESCAPE_BLOB_MAP_TAG:        u64 = 0x4250414D43534556u64;
 pub const ESCAPE_CONTEXT_INIT_TAG:    u64 = 0x4958544343534556u64;
 pub const ESCAPE_BLIT_INIT_TAG:       u64 = 0x54494C4243534556u64;
@@ -94,7 +94,6 @@ pub const ALLOCATE_3D_TAG:            u64 = 0x4C4744334C4C4156u64;
 pub const ALLOCATE_BLOB_TAG:          u64 = 0x424F4C424C4C4156u64;
 
 pub const SUBMIT_COMMAND_VIRTUAL_TAG: u64 = 0x56444D4342555356u64;
-
 
 /* This should not be manually implemented, use derive instead */
 pub unsafe trait Tagged: Sized {
@@ -399,51 +398,6 @@ impl fmt::Debug for ContextInit {
     }
 }
 
-#[repr(C, packed)]
-#[derive(Debug, Copy, Clone)]
-pub struct BlobInfo {
-    pub width: u32,
-    pub height: u32,
-    pub format: u32,
-    pub bind: u32,
-    pub modifier: u64,
-    pub strides: [u32; 4],
-    pub offsets: [u32; 4],
-}
-
-#[repr(C, packed)]
-#[derive(Copy, Clone, Debug)]
-pub struct AllocateBlobFull {
-    pub blob: AllocateBlob,
-    pub info: BlobInfo,
-    pub info_valid: bool,
-    pub created: bool,
-}
-
-#[repr(C, packed)]
-#[derive(Copy, Clone, Debug)]
-pub struct Allocate3dFull {
-    pub _3d: Allocate3d,
-    pub modifier: u64,
-    pub offsets: [u64; 4],
-    pub strides: [u32; 4],
-    pub sizes: [u32; 4],
-    pub num_planes: u32,
-}
-
-#[repr(C, packed)]
-#[derive(Copy, Clone)]
-pub union AllocationInfo {
-    pub tag: u64,
-    pub _3d: Allocate3dFull,
-    pub blob: AllocateBlobFull,
-}
-
-impl AllocationInfo {
-    pub fn tag(&self) -> u64 {
-        unsafe { self.tag }
-    }
-}
 
 #[repr(C, packed)]
 #[derive(Copy, Clone, Tagged)]
@@ -452,8 +406,8 @@ pub struct ResourceInfo {
     pub tag: u64,
 
     pub handle: D3DKMT_HANDLE,
-    pub id: u32,
-    pub info: AllocationInfo,
+    pub padding: u32,
+    pub info: CreateAllocation,
 }
 
 #[repr(C)]
@@ -505,6 +459,7 @@ pub struct ResourceBusy {
     /* pub create_event: bool */
 }
 
+/*
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone, Tagged)]
 #[tagged(ESCAPE_BLOB_INFO_SET_TAG)]
@@ -515,6 +470,7 @@ pub struct BlobInfoSet {
     pub _padding: u32,
     pub blob_info: BlobInfo,
 }
+*/
 
 bitflags! {
     #[repr(transparent)]
@@ -572,7 +528,7 @@ pub union Escape {
     pub ctx_init: ContextInit,
     pub res_info: ResourceInfo,
     pub res_busy: ResourceBusy,
-    pub blob_set: BlobInfoSet,
+    //pub blob_set: BlobInfoSet,
     pub blob_map: BlobMap,
     pub exec_buf: ExecBuffer,
     //pub res_atta: ResourceAttachContext,
@@ -590,9 +546,7 @@ impl Escape {
 pub struct CreateResource {
     pub tag: u64,
 
-    // TODO: inline slice instead
     pub cmd: [u8; 0],
-    //pub submit: Slice64<u8>,
 }
 
 impl CreateResource {
@@ -620,14 +574,6 @@ pub struct Allocate3d {
     pub size: u64,
 }
 
-//#[repr(u32)]
-//#[derive(Debug, Copy, Clone)]
-//pub enum BlobMem {
-//    Guest = 0x1,
-//    Host3d = 0x2,
-//    Host3dGuest = 0x3,
-//}
-
 bitflags! {
     #[repr(transparent)]
     #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -654,6 +600,21 @@ bitflags! {
 }
 
 #[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+pub struct BlobInfo {
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub bind: u32,
+}
+
+impl BlobInfo {
+    pub fn is_valid(&self) -> bool {
+        self.format != 0 && self.width != 0 && self.height != 0
+    }
+}
+
+#[repr(C, packed)]
 #[derive(Debug, Copy, Clone, Tagged)]
 #[tagged(ALLOCATE_BLOB_TAG)]
 pub struct AllocateBlob {
@@ -662,21 +623,55 @@ pub struct AllocateBlob {
     pub id: u64,
     pub mem: BlobMem,
     pub flags: BlobFlag,
-
     pub size: u64,
+    pub info: BlobInfo,
 }
 
 #[repr(C, packed)]
 #[derive(Copy, Clone)]
-pub union CreateAllocation {
+pub union CreateAllocationInfo {
     pub tag: u64,
     pub _3d: Allocate3d,
     pub blob: AllocateBlob,
 }
 
-impl CreateAllocation {
+impl CreateAllocationInfo {
     pub fn tag(&self) -> u64 {
         unsafe { self.tag }
+    }
+}
+
+impl fmt::Debug for CreateAllocationInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.tag() {
+            ALLOCATE_3D_TAG => write!(f, "{:?}", unsafe { &self._3d }),
+            ALLOCATE_BLOB_TAG => write!(f, "{:?}", unsafe { &self.blob }),
+            _ => write!(f, "Invalid({:?}", Tag(self.tag())),
+        }
+    }
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+pub struct PlaneLayout {
+    pub offset: u64,
+    pub size: u64,
+    pub stride: u64,
+}
+
+#[repr(C, packed)]
+#[derive(Debug, Copy, Clone)]
+pub struct CreateAllocation {
+    pub base: CreateAllocationInfo,
+    pub res_id: u32,
+    pub num_planes: u32,
+    pub modifier: u64,
+    pub planes: [PlaneLayout; 4],
+}
+
+impl CreateAllocation {
+    pub fn tag(&self) -> u64 {
+        unsafe { self.base.tag }
     }
 }
 
@@ -1032,13 +1027,14 @@ const _: () = assert!(core::mem::size_of::<AdapterInfo>() == 26);
 //const _: () = assert!(core::mem::size_of::<PCIInfo>() == 24);
 const _: () = assert!(core::mem::size_of::<Capset>() == 16);
 const _: () = assert!(core::mem::size_of::<ContextInit>() == 80);
-const _: () = assert!(core::mem::size_of::<ResourceInfo>() == 148);
+//const _: () = assert!(core::mem::size_of::<ResourceInfo>() == 148);
 const _: () = assert!(core::mem::size_of::<ResourceBusy>() == 22);
-const _: () = assert!(core::mem::size_of::<BlobInfoSet>() == 72);
-const _: () = assert!(core::mem::size_of::<Escape>() == 148);
-const _: () = assert!(core::mem::size_of::<AllocateBlob>() == 32);
+//const _: () = assert!(core::mem::size_of::<BlobInfoSet>() == 72);
+//const _: () = assert!(core::mem::size_of::<Escape>() == 168);
+const _: () = assert!(core::mem::size_of::<AllocateBlob>() == 48);
 const _: () = assert!(core::mem::size_of::<Allocate3d>() == 56);
-const _: () = assert!(core::mem::size_of::<CreateAllocation>() == 56);
+const _: () = assert!(core::mem::size_of::<CreateAllocationInfo>() == 56);
+const _: () = assert!(core::mem::size_of::<CreateAllocation>() == 168);
 const _: () = assert!(core::mem::size_of::<CreateResource>() == 8);
 const _: () = assert!(core::mem::size_of::<CommandHeader>() == 8);
 //const _: () = assert!(core::mem::size_of::<CommandMapBlob>() == 4);

@@ -809,7 +809,7 @@ unsafe extern "C" fn get_standard_allocation_driver_data(adapter: HANDLE, standa
 
     let alloc_priv = unsafe { transmute::<_, &mut CreateAllocation>(standard_allocation.pAllocationPrivateDriverData) };
 
-    let alloc_3d = unsafe { &mut alloc_priv._3d };
+    let alloc_3d = unsafe { &mut alloc_priv.base._3d };
     *alloc_3d = Allocate3d {
         tag: uapi::ALLOCATE_3D_TAG,
         target: VIRGL_TARGET_TEXTURE_2D,
@@ -825,7 +825,7 @@ unsafe extern "C" fn get_standard_allocation_driver_data(adapter: HANDLE, standa
         size,
     };
 
-    debug!("{}: standard allocation -> {:?}", function!(), allocation::VirtioResource::from(unsafe { alloc_priv._3d }));
+    debug!("{}: standard allocation -> {:?}", function!(), allocation::VirtioResource::from(*alloc_3d));
 
     STATUS::SUCCESS.to_u32()
 }

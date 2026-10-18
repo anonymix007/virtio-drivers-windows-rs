@@ -1094,20 +1094,20 @@ impl FlipTimerContext {
 
                     rect
                 },
-                VirtioResource::Blob { info, .. } => {
-                    let Some(info) = *info.read() else {
-                        error!("{}: allocation {:?} does not have blob info yet", function!(), alloc);
+                VirtioResource::Blob { layout, .. } => {
+                    let Some(layout) = *layout.read() else {
+                        error!("{}: allocation {:?} does not have blob layout yet", function!(), alloc);
                         continue;
                     };
 
                     let rect = gpu::Rect {
                         x: 0,
                         y: 0,
-                        width: info.width,
-                        height: info.height,
+                        width: layout.info.width,
+                        height: layout.info.height,
                     };
 
-                    let _ = self.chan.set_scanout_blob(rect, i as u32, res_id, info).inspect_err(|e|
+                    let _ = self.chan.set_scanout_blob(rect, i as u32, res_id, layout).inspect_err(|e|
                         error!("{}: failed to set scanout: {:?}", function!(), e)
                     );
 
