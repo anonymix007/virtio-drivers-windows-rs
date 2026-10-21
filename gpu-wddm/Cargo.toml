@@ -16,7 +16,7 @@ spin.workspace = true
 uart_16550.workspace = true
 virtio-drivers = { path = "../virtio-drivers", features = ["alloc"], default-features = false }
 tagged = { path = "../proc/tagged" }
-wdk = { path = "../wdk" }
+wdk = { path = "../wdk", features = ["dxgkrnl"] }
 zerocopy.workspace = true
 winresult.workspace = true
 ida-rs.workspace = true

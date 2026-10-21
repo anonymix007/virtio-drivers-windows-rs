@@ -15,3 +15,7 @@ log.workspace = true
 [build-dependencies]
 bindgen.workspace = true
 ewdk = { path = "../util/ewdk" }
+
+[features]
+dxgkrnl = []
+wdf = []

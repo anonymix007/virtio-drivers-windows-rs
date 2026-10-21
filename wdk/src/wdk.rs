@@ -13,5 +13,7 @@
 )]
 
 pub mod wdm;
+#[cfg(feature = "dxgkrnl")]
 pub mod dxgkrnl;
+#[cfg(feature = "wdf")]
 pub mod wdf;
