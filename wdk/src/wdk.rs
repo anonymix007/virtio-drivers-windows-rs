@@ -1,6 +1,6 @@
 #![no_std]
 
-#![feature(allocator_api)]
+#![feature(allocator_ext)]
 
 #![allow(
     non_upper_case_globals,

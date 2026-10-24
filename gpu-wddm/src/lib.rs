@@ -4,7 +4,7 @@
 #![allow(dead_code)]
 //#![feature(stmt_expr_attributes)]
 //#![feature(ptr_alignment_type)]
-#![feature(allocator_api)]
+#![feature(allocator_ext)]
 //#![feature(get_mut_unchecked)]
 //#![feature(generic_const_exprs)]
 //#![feature(slice_ptr_get)]
