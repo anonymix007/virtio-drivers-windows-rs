@@ -45,9 +45,10 @@ cbindgen --config $DIR/gpu-wddm/cbindgen.toml $DIR/gpu-wddm/src/uapi.rs --lang C
 if [ "$1" != "--no-force-rebuild" ]; then
   touch $DIR/gpu-wddm/build.rs
 fi
-cargo build $CARGO_FLAVOR --package virtio-gpu-wddm-rs
 
-. $DIR/ewdk.env
+if [ "$1" != "--no-build" ]; then
+  cargo build $CARGO_FLAVOR --package virtio-gpu-wddm-rs
+fi
 
 BUILDDATE=$(TZ=UTC+0 date '+%m/%d/%Y')
 
@@ -67,5 +68,5 @@ osslsigncode sign -key $KEY -certs $CERT $DRIVER.dll $DIST/$NAME.sys
 makecat --os-attr "2:10.0" --os "$WINVER" --hwid "$HWID" --output $DIST/$NAME.cat-unsigned $DIST/*
 osslsigncode sign -key $KEY -certs $CERT $DIST/$NAME.cat-unsigned $DIST/$NAME.cat
 rm $DIST/$NAME.cat-unsigned
-cp $DRIVER.pdb $DIST/
+cp $DRIVER.pdb $DIST/ ||  echo "No PDB for KMD"
 cp $MESA/*.debug $DIST/ || echo "No split debug files"
