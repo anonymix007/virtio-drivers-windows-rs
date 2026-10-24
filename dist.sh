@@ -45,7 +45,10 @@ cbindgen --config $DIR/gpu-wddm/cbindgen.toml $DIR/gpu-wddm/src/uapi.rs --lang C
 if [ "$1" != "--no-force-rebuild" ]; then
   touch $DIR/gpu-wddm/build.rs
 fi
-cargo build $CARGO_FLAVOR --package virtio-gpu-wddm-rs
+
+if [ "$1" != "--no-build" ]; then
+  cargo build $CARGO_FLAVOR --package virtio-gpu-wddm-rs
+fi
 
 . $DIR/ewdk.env
 
