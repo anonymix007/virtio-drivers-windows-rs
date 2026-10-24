@@ -5,7 +5,9 @@ use log::{LevelFilter, Log, Metadata, Record, SetLoggerError};
 use spin::Spin;
 use spin::mutex::spin::{SpinMutex, SpinMutexGuard};
 // TODO: aarch64
-use uart_16550::SerialPort;
+use uart_16550::{Config, Uart16550Tty, backend::PioBackend};
+
+type SerialPort = Uart16550Tty<PioBackend>;
 
 use crossbeam::queue::ArrayQueue;
 
@@ -158,8 +160,7 @@ pub fn set_log_level_temp(max_level: LevelFilter) -> LogLevelGuard {
 }*/
 
 pub fn init(max_level: LevelFilter) -> Result<(), SetLoggerError> {
-    let mut uart = unsafe { SerialPort::new(SERIAL_PORT) };
-    uart.init();
+    let uart = unsafe { SerialPort::new_port(SERIAL_PORT, Config::default()) }.unwrap();
 
     LOGGER.replace(Logger {
         uart: TimeoutMutex::new(Some(uart)),
