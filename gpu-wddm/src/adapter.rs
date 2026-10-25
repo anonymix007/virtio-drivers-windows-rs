@@ -1,6 +1,8 @@
 #![allow(non_upper_case_globals)]
 
 use core::{
+    fmt,
+    fmt::Write,
     ptr::{
         null_mut,
         drop_in_place,
@@ -960,6 +962,40 @@ pub const BLOB_MAP_SEGMENT_GPU_PADDR:   u64 = 0x0700000000;
 pub const BLOB_SHARE_SEGMENT_GPU_PADDR: u64 = 0x2000000000;
 */
 
+pub struct Utf16BufferWriter<const N: usize> {
+    buf: [WCHAR; N],
+    pos: usize,
+}
+
+impl<const N: usize> Utf16BufferWriter<N> {
+    pub fn new() -> Self {
+        Self {
+            buf: [0; N],
+            pos: 0,
+        }
+    }
+}
+
+impl<const N: usize> core::fmt::Write for Utf16BufferWriter<N> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let limit = N.saturating_sub(1);
+        let mut tmp = [0u16; 2];
+
+        for c in s.chars() {
+            let enc = c.encode_utf16(&mut tmp);
+            if self.pos + enc.len() > limit {
+                // NUL-terminate and report overflow
+                self.buf[self.pos] = 0;
+                return Err(fmt::Error);
+            }
+            self.buf[self.pos..self.pos + enc.len()].copy_from_slice(enc);
+            self.pos += enc.len();
+        }
+        self.buf[self.pos] = 0; // keep NUL after every successful write
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Engine {
     Graphics,
@@ -1003,6 +1039,7 @@ impl Engine {
     }
 
     pub fn fill_metadata(&self, metadata: &mut DXGK_NODEMETADATA) {
+        let mut name = Utf16BufferWriter::new();
         match self {
             Engine::Graphics => {
                 debug!("{}: {:?} -> DXGK_ENGINE_TYPE_3D", function!(), self);
@@ -1016,12 +1053,16 @@ impl Engine {
             Engine::PhysicalOther => {
                 debug!("{}: {:?} -> DXGK_ENGINE_TYPE_OTHER (phys)", function!(), self);
                 metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_OTHER;
+                let _ = write!(name, "{:?}", self);
+                metadata.FriendlyName = name.buf;
             },
             Engine::Other(_) => {
                 debug!("{}: {:?} -> DXGK_ENGINE_TYPE_OTHER", function!(), self);
                 metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_OTHER;
                 metadata.GpuMmuSupported = true as _;
                 //metadata.Flags.set_ContextSchedulingSupported(true);
+                let _ = write!(name, "{:?}", self);
+                metadata.FriendlyName = name.buf;
             },
         }
     }
