@@ -859,7 +859,7 @@ impl Device {
                                size: plane.size as u64,
                             });
                         },
-                        Ok(None) => warn!("{}: failed to query resource layout: no layout: {:?}", function!(), alloc),
+                        Ok(None) => debug!("{}: failed to query resource layout: no layout: {:?}", function!(), alloc),
                         Err(e) => warn!("{}: failed to query resource layout: {:?}", function!(), e),
                     }
                 }
