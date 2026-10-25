@@ -1189,8 +1189,8 @@ impl Drop for FlipTimer {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Immutable, IntoBytes, KnownLayout, FromBytes)]
 struct BGRA {
     b: u8,
-    r: u8,
     g: u8,
+    r: u8,
     a: u8,
 }
 
@@ -1249,15 +1249,23 @@ impl Cursor {
         })
     }
 
-    pub fn set_position(&mut self, x: u32, y: u32) {
+    fn set_position(&mut self, x: u32, y: u32) {
         self.position = (x, y);
     }
 
-    pub fn set_hotspot(&mut self, x_hot: u32, y_hot: u32) {
+    fn set_hotspot(&mut self, x_hot: u32, y_hot: u32) {
         self.hotspot = (x_hot, y_hot);
     }
 
-    pub fn write_bgra(&mut self, src: &[u8], src_stride: usize) {
+    fn apply_offset(&mut self, x_off: u32, y_off: u32) {
+        self.hotspot.0 += x_off;
+        self.position.0 = self.position.0.saturating_sub(x_off);
+
+        self.hotspot.1 += y_off;
+        self.position.1 = self.position.1.saturating_sub(y_off);
+    }
+
+    fn write_bgra(&mut self, src: &[u8], src_stride: usize) {
         let dst_stride = (self.pixels.width as usize) * self.pixels.format.stride();
         let rows = src.len() / src_stride;
         let pixels = self.pixels.pixels.as_mut();
@@ -1267,8 +1275,67 @@ impl Cursor {
         }
     }
 
-    pub fn write_mono(&mut self, mask: &[u8], mask_stride: usize) {
+    fn mono_offset(&self, mask: &[u8], mask_stride: usize) -> (usize, usize) {
         let dst_w = self.pixels.width as usize;
+        let dst_h = self.pixels.height as usize;
+        let w = mask_stride * 8;
+        let h = mask.len() / (mask_stride * 2);
+
+        let and_mask = &mask[..mask.len() / 2];
+        let xor_mask = &mask[mask.len() / 2..];
+
+        let mut x_off = 0;
+        let mut y_off = 0;
+
+        let mut x_max = 0;
+        let mut y_max = 0;
+
+        for y in 0..h {
+            let mut bit = 0x80u8;
+            for x in 0..w {
+                let byte_idx = y * mask_stride + x / 8;
+                let and = (and_mask[byte_idx] & bit) != 0;
+                let xor = (xor_mask[byte_idx] & bit) != 0;
+
+                if and && xor {
+                    if x == 0 {
+                        x_off = 1;
+                    } else {
+                        x_max = core::cmp::max(x_max, x);
+                    }
+
+                    if y == 0 {
+                        y_off = 1;
+                    } else {
+                        y_max = core::cmp::max(y_max, y);
+                    }
+                }
+
+                bit >>= 1;
+                if bit == 0 {
+                    bit = 0x80;
+                }
+            }
+        }
+
+        /* TODO: how to handle this better? We need to offset the cursor to make the outline fit,
+         * but this will cut off the outline on the other side instead. */
+        if x_max + x_off + 1 >= dst_w {
+            x_off = 0;
+        }
+        if y_max + y_off + 1 >= dst_h {
+            y_off = 0;
+        }
+
+        (x_off, y_off)
+    }
+
+    fn write_mono(&mut self, mask: &[u8], mask_stride: usize) {
+        let (x_off, y_off) = self.mono_offset(mask, mask_stride);
+        self.apply_offset(x_off as _, y_off as _);
+
+        let dst_w = self.pixels.width as usize;
+        let dst_h = self.pixels.height as usize;
         let w = mask_stride * 8;
         let h = mask.len() / (mask_stride * 2);
         let pixels = self.pixels.pixels.as_mut();
@@ -1304,7 +1371,10 @@ impl Cursor {
                         Self::OPAQUE | Self::BACKGROUND
                     }
                 };
-                BGRA::from(pix).write_to_prefix(&mut pixels[(y * dst_w + x) * 4..]).unwrap();
+
+                if (x + x_off < dst_w) && (y + y_off < dst_h) {
+                    BGRA::from(pix).write_to_prefix(&mut pixels[((y + y_off) * dst_w + (x + x_off)) * 4..]).unwrap();
+                }
 
                 bit >>= 1;
                 if bit == 0 {
@@ -1342,16 +1412,64 @@ impl Cursor {
                 }
             }
         }
+    }
 
-        //for y in 0..h {
-        //    let row = &pixels[y * dst_w * 4..(y * dst_w + w) * 4];
-        //    info!("{}: {:?}", y, row);
-        //}
+    fn masked_color_offset(&self, masked_color: &[u8], mask_stride: usize) -> (usize, usize) {
+        let dst_w = self.pixels.width as usize;
+        let dst_h = self.pixels.height as usize;
+        let w = mask_stride / 4;
+        let h = masked_color.len() / mask_stride;
+
+        let mut x_off = 0;
+        let mut y_off = 0;
+
+        let mut x_max = 0;
+        let mut y_max = 0;
+
+        for y in 0..h {
+            for x in 0..w {
+                let b = masked_color[y * mask_stride + x * 4 + 0];
+                let g = masked_color[y * mask_stride + x * 4 + 1];
+                let r = masked_color[y * mask_stride + x * 4 + 2];
+                let mask = masked_color[y * mask_stride + x * 4 + 3];
+
+                let bgr = ((r as u32) << (8 * 2)) | ((g as u32) << (8 * 1)) | ((b as u32) << (8 * 0));
+
+                if mask == 0xFF && bgr != 0 {
+                    if x == 0 {
+                        x_off = 1;
+                    } else {
+                        x_max = core::cmp::max(x_max, x);
+                    }
+
+                    if y == 0 {
+                        y_off = 1;
+                    } else {
+                        y_max = core::cmp::max(y_max, y);
+                    }
+                }
+            }
+        }
+
+        /* TODO: how to handle this better? We need to offset the cursor to make the outline fit,
+         * but this will cut off the outline on the other side instead. */
+        if x_max + x_off + 1 >= dst_w {
+            x_off = 0;
+        }
+        if y_max + y_off + 1 >= dst_h {
+            y_off = 0;
+        }
+
+
+        (x_off, y_off)
     }
 
     // TODO: this seems to work for grab/grabbing cursors, but is it correct for others?
-    pub fn write_masked_color(&mut self, masked_color: &[u8], mask_stride: usize) {
+    fn write_masked_color(&mut self, masked_color: &[u8], mask_stride: usize) {
+        let (x_off, y_off) = self.masked_color_offset(masked_color, mask_stride);
+        self.apply_offset(x_off as _, y_off as _);
         let dst_w = self.pixels.width as usize;
+        let dst_h = self.pixels.height as usize;
         let w = mask_stride / 4;
         let h = masked_color.len() / mask_stride;
         let pixels = self.pixels.pixels.as_mut();
@@ -1366,15 +1484,24 @@ impl Cursor {
                 let r = masked_color[y * mask_stride + x * 4 + 2];
                 let mask = masked_color[y * mask_stride + x * 4 + 3];
 
-                let pix = if mask == 0 {
-                    let bgr = ((r as u32) << (8 * 2)) | ((g as u32) << (8 * 1)) | ((b as u32) << (8 * 0));
-                    Self::OPAQUE | bgr
-                } else {
-                    has_inverted = true;
-                    Self::INVERTED
-                };
+                let bgr = ((r as u32) << (8 * 2)) | ((g as u32) << (8 * 1)) | ((b as u32) << (8 * 0));
 
-                BGRA::from(pix).write_to_prefix(&mut pixels[(y * dst_w + x) * 4..]).unwrap();
+                let pix = match (mask, bgr) {
+                    (0xFF, 0) => {
+                        Self::TRANSPARENT
+                    },
+                    (0xFF, bgr) => {
+                        has_inverted = true;
+                        Self::INVERTED
+                    },
+                    (0x00, bgr) => {
+                        Self::OPAQUE | bgr
+                    },
+                    _ => unreachable!("invalid mask value: {:x}", mask),
+                };
+                if (x + x_off < dst_w) && (y + y_off < dst_h) {
+                    BGRA::from(pix).write_to_prefix(&mut pixels[((y + y_off) * dst_w + (x + x_off)) * 4..]).unwrap();
+                }
             }
         }
 
@@ -1406,23 +1533,23 @@ impl Cursor {
                 for x in 0..w {
                     let idx = y * dst_w + x;
                     if BGRA::read_from_prefix_into_u32(&pixels[idx * 4..]) == Self::INVERTED {
-                        BGRA::from(Self::TRANSPARENT).write_to_prefix(&mut pixels[idx * 4..]).unwrap();
+                        BGRA::from(Self::OPAQUE | Self::FOREGROUND).write_to_prefix(&mut pixels[idx * 4..]).unwrap();
                     }
                 }
             }
         }
     }
 
-    pub fn transfer_pixels(&self, chan: &GpuChannel) -> Result<(), NtStatus> {
+    fn transfer_pixels(&self, chan: &GpuChannel) -> Result<(), NtStatus> {
         self.pixels.transfer_to_host(chan)
     }
 
-    pub fn r#move(&self, chan: &GpuChannel, scanout: u32) -> Result<(), NtStatus> {
+    fn r#move(&self, chan: &GpuChannel, scanout: u32) -> Result<(), NtStatus> {
         let (x, y) = self.position;
         chan.move_cursor(scanout, x, y)
     }
 
-    pub fn update(&self, chan: &GpuChannel, scanout: u32) -> Result<(), NtStatus> {
+    fn update(&self, chan: &GpuChannel, scanout: u32) -> Result<(), NtStatus> {
         let (x, y) = self.position;
         let (x_hot, y_hot) = self.hotspot;
         let res_id = self.pixels.id;

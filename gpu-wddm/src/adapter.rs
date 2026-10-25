@@ -2808,7 +2808,7 @@ impl Adapter {
             }
 
             //for y in 0..height {
-            //    let row = &pixels[y * stride..(y + 1) * stride];
+            //    let row = &masked_color[y * stride..(y + 1) * stride];
             //    info!("{}: {:?}", y, row);
             //}
         } else {
