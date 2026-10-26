@@ -1073,7 +1073,7 @@ impl FlipTimerContext {
             }
             */
 
-            trace!("{}: vsync {:x} for alloc {}", function!(), addr, res_id);
+            trace!("{}: scanout {}: vsync {:x} for alloc {}", function!(), i, addr, res_id);
             //warn!("{}: vsync {:x} for alloc {:?}", function!(), addr, alloc);
             //alloc.debug_print_attached_pages(self.chan.dxgk_interface());
 

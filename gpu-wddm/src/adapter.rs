@@ -2721,7 +2721,7 @@ impl Adapter {
         }
 
         let edid = match &state.outputs[scanout] {
-            Some(info) => &info.edid.data[0..core::cmp::min(256, info.edid.size as usize)],
+            Some(info) => &info.edid.data[..info.edid.size as usize],
             None => {
                 error!("{}: no EDID for scanout {}", function!(), scanout);
                 return Err(NtStatus(STATUS::GRAPHICS_CHILD_DESCRIPTOR_NOT_SUPPORTED));
@@ -2931,7 +2931,7 @@ impl Adapter {
         let Some(pinned_mode_info) = source_mode_set.acquire_pinned_mode_info_autorelease().inspect_err(|e|
             error!("{}: failed to acquire pinned mode info: {:?}", function!(), e)
         )? else {
-            error!("{}: failed to acquire pinned mode info: ", function!());
+            error!("{}: failed to acquire pinned mode info: not available", function!());
             return Err(NtStatus(STATUS::INVALID_PARAMETER));
         };
 
