@@ -2503,6 +2503,7 @@ impl Adapter {
                 alloc_info.PreferredSegment.set_SegmentId0(MemorySegment::Aperture3D as _);
                 alloc_info.PreferredSegment.set_Direction0(false);         // Allocate from start
                 alloc_info.FlagsWddm2_mut().set_CpuVisible(true);
+                alloc_info.FlagsWddm2_mut().set_Cached(allocation.is_coherent());
                 //alloc_info.FlagsWddm2_mut().set_AccessedPhysically(true);
                 *alloc_info.SupportedReadSegmentSet_mut() = MemorySegment::Aperture3D.mask();
                 alloc_info.SupportedWriteSegmentSet = MemorySegment::Aperture3D.mask();

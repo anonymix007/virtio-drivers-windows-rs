@@ -287,6 +287,11 @@ impl DXGK_ALLOCATIONINFOFLAGS_WDDM2_0 {
         unsafe { self.__bindgen_anon_1.__bindgen_anon_1.set_AccessedPhysically(val as _); }
     }
 
+    #[inline]
+    pub fn set_Cached(&mut self, val: bool) {
+        unsafe { self.__bindgen_anon_1.__bindgen_anon_1.set_Cached(val as _); }
+    }
+
     //#[inline]
     //pub fn set_ExplicitResidencyNotification(&mut self, val: bool) {
     //    unsafe { self.__bindgen_anon_1.__bindgen_anon_1.set_ExplicitResidencyNotification(val as _); }

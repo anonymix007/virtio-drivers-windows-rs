@@ -634,13 +634,19 @@ impl Allocation {
         matches!(self.resource, VirtioResource::Blob { .. })
     }
 
+    pub fn is_coherent(&self) -> bool {
+        match &self.resource {
+            VirtioResource::_3D { flags, .. } => flags.contains(VirglFlags::MAP_COHERENT),
+            VirtioResource::Blob { flags, .. } => flags.contains(BlobFlag::MAPPABLE),
+        }
+    }
+
     pub fn can_be_mapped(&self) -> bool {
         match &self.resource {
             VirtioResource::_3D { .. } => false,
             VirtioResource::Blob { flags, .. } => flags.contains(BlobFlag::MAPPABLE),
         }
     }
-
 
     fn set_flag_mapped(flags: &AtomicU32, mapped: bool) {
         if mapped {
