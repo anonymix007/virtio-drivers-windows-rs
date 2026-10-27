@@ -2788,7 +2788,7 @@ impl Adapter {
         let targets = &state.source_target_map[source as usize];
 
         if targets.len() == 0 {
-            return Err(NtStatus(STATUS::GRAPHICS_INVALID_VIDEO_PRESENT_SOURCE));
+            warn!("{}: source {}: has no targets", function!(), source);
         }
 
         Ok(targets)
