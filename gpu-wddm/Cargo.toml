@@ -10,7 +10,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 bitflags.workspace = true
-crossbeam.workspace = true
+#crossbeam.workspace = true
+crossbeam-queue.workspace = true
 log.workspace = true
 spin.workspace = true
 uart_16550.workspace = true
@@ -28,6 +29,7 @@ smallvec.workspace = true
 hashbrown.workspace = true
 modular-bitfield.workspace = true
 itertools.workspace = true
+#rcu_cell = { path = "../util/rcu_cell" }
 
 [build-dependencies]
 chrono.workspace = true

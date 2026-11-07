@@ -17,5 +17,6 @@ bindgen.workspace = true
 ewdk = { path = "../util/ewdk" }
 
 [features]
+default = ["dxgkrnl"]
 dxgkrnl = []
 wdf = []

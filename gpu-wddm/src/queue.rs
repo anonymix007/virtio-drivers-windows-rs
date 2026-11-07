@@ -19,6 +19,7 @@ use core::{
             AtomicBool,
             AtomicU32,
             AtomicU64,
+            AtomicPtr,
             Ordering,
         },
     },
@@ -32,6 +33,7 @@ use core::{
     ops::{
         Deref,
         DerefMut,
+        RangeInclusive,
     },
 };
 
@@ -45,7 +47,10 @@ use alloc::{
         VecDeque,
         BTreeSet,
     },
-    sync::Arc,
+    sync::{
+        Arc,
+        Weak,
+    },
     vec::Vec,
 };
 
@@ -53,10 +58,7 @@ use alloc::{
 use smallvec::SmallVec;
 use pin_init::*;
 use zerocopy::*;
-use crossbeam::{
-    queue::*,
-    utils::*,
-};
+use crossbeam_queue::*;
 use winresult::STATUS;
 use virtio_drivers::{
     config::*,
@@ -85,6 +87,7 @@ use crate::adapter::*;
 use crate::uapi::*;
 use crate::allocation::*;
 use crate::command::{*, Command};
+use crate::device::{Context, HwQueue};
 
 use crate::map_virtio_error;
 use crate::function;
@@ -235,6 +238,25 @@ impl Drop for AllocationsBatch {
     }
 }
 
+#[derive(Debug)]
+pub enum SubmitCommandCallback {
+    DmaCompleted(Engine, u32),
+    DmaCompletedWithAllocations(Engine, u32, AllocationsBatch),
+    DmaCompletedBatched(Engine, u32, Arc<AllocationsBatch>),
+    DmaCompletedHwQueue(Arc<HwQueue>, u64)
+}
+
+impl<const MAX_INLINE: usize> Into<Callback<MAX_INLINE>> for SubmitCommandCallback {
+    fn into(self) -> Callback<MAX_INLINE> {
+        match self {
+            SubmitCommandCallback::DmaCompleted(engine, fence) => Callback::DmaCompleted(engine, fence),
+            SubmitCommandCallback::DmaCompletedWithAllocations(engine, fence, allocs) => Callback::DmaCompletedWithAllocations(engine, fence, allocs),
+            SubmitCommandCallback::DmaCompletedBatched(engine, fence, batch) => Callback::DmaCompletedBatched(engine, fence, batch),
+            SubmitCommandCallback::DmaCompletedHwQueue(hw_queue, fence) => Callback::DmaCompletedHwQueue(hw_queue, fence),
+        }
+    }
+}
+
 enum Callback<const MAX_INLINE: usize> {
     None,
     SetEvent(BlockingBuffer<MaybeInlineBuffer<MAX_INLINE>>),
@@ -244,6 +266,7 @@ enum Callback<const MAX_INLINE: usize> {
     DmaCompleted(Engine, u32),
     DmaCompletedWithAllocations(Engine, u32, AllocationsBatch),
     DmaCompletedBatched(Engine, u32, Arc<AllocationsBatch>),
+    DmaCompletedHwQueue(Arc<HwQueue>, u64),
     //AsyncCallback(dyn FnOnce() -> ()),
     // Async(...),
 }
@@ -529,57 +552,24 @@ impl<const BUFFERS: usize, const IN: usize, const OUT: usize> Buffers<BUFFERS, I
     }
 }
 
-// FIXME: check for race conditions
-struct ArraySegQueue<T> {
-    fast: ArrayQueue<T>,
-    slow: SegQueue<T>,
-}
-
-impl<T> ArraySegQueue<T> {
-    fn new(cap: usize) -> Self {
-        Self {
-            fast: ArrayQueue::new(cap),
-            slow: SegQueue::new(),
-        }
-    }
-
-    fn push(&self, value: T) {
-        if let Err(value) = self.fast.push(value) {
-            self.slow.push(value);
-        }
-    }
-
-    fn pop(&self) -> Option<T> {
-        if let Some(v) = self.slow.pop() {
-            if let Some(v) = self.fast.force_push(v) {
-                Some(v)
-            } else {
-                self.fast.pop()
-            }
-        } else {
-            self.fast.pop()
-        }
-    }
-}
-
 #[pin_data]
 struct AsyncQueue<T> {
     #[pin]
     event: KeEvent,
 
-    q: ArraySegQueue<T>,
+    q: SegQueue<T>,
 }
 
 impl<T> AsyncQueue<T> {
-    fn try_new(cap: usize) -> Result<Pin<Arc<Self>>, NtStatus> {
-        let q: Pin<Arc<Self>> = Arc::try_pin_init(Self::init(cap))?;
+    fn try_new() -> Result<Pin<Arc<Self>>, NtStatus> {
+        let q: Pin<Arc<Self>> = Arc::try_pin_init(Self::init())?;
         Ok(q)
     }
 
-    fn init(cap: usize) -> impl PinInit<Self, NtStatus> {
+    fn init() -> impl PinInit<Self, NtStatus> {
         pin_init!(Self {
             event <- KeEvent::new(EventType::Synchronization, false),
-            q: ArraySegQueue::new(cap),
+            q: SegQueue::new(),
         }? NtStatus)
     }
 
@@ -615,8 +605,8 @@ const DEFAULT_BLOCKING_TIMEOUT: NtTime = NtTime::relative_ms(5_000);
 struct QueueChannel<const IN: usize, const OUT: usize>(Pin<Arc<AsyncQueue<Buffer<IN, OUT>>>>);
 
 impl<const IN: usize, const OUT: usize> QueueChannel<IN, OUT> {
-    fn try_new(cap: usize) -> Result<Self, NtStatus> {
-        Ok(Self(AsyncQueue::try_new(cap)?))
+    fn try_new() -> Result<Self, NtStatus> {
+        Ok(Self(AsyncQueue::try_new()?))
     }
 
     pub fn request_async_buf(&self, input: MaybeInlineBuffer<IN>, output: MaybeInlineBuffer<OUT>, callback: Callback<OUT>) -> Result<(), NtStatus> {
@@ -743,7 +733,7 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         init!(Self {
             queue <- init_queue,
             buffers <- Buffers::new(),
-            chan: QueueChannel::try_new(FAST)?,
+            chan: QueueChannel::try_new()?,
             //fast: ArrayQueue::new(FAST),
             //slow: SegQueue::new(),
             //nop: SegQueue::new(),
@@ -1077,6 +1067,12 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
 
                 self.mark_free(i);
             },
+
+            Callback::DmaCompletedHwQueue(hw_queue, fence) => {
+                data.notify_hw_queue(hw_queue, fence);
+
+                self.mark_free(i);
+            },
         };
 
         Ok(Some(()))
@@ -1383,6 +1379,9 @@ struct EngineState {
     pending_fences: SpinMutex<BTreeSet<u32>>,
     last_submitted_timestamp: AtomicU64,
     last_completed_timestamp: AtomicU64,
+    // TODO: this hangs even though there doesn't seem to be any missed fences
+    //completed_queue: ReorderingQueue,
+    suspend_queue: SegQueue<(Weak<Context>, u64)>,
 }
 
 impl EngineState {
@@ -1403,6 +1402,7 @@ impl EngineState {
     fn is_responsive(&self) -> bool {
         let last_submitted_fence = self.last_submitted_fence.load(Ordering::SeqCst);
         let last_completed_fence = self.last_completed_fence.load(Ordering::SeqCst);
+        //let last_completed_fence = self.completed_queue.current.load(Ordering::SeqCst) as u32;
 
         if last_completed_fence == last_submitted_fence {
             /* No work is pending, assume responsive */
@@ -1538,15 +1538,59 @@ impl GpuData {
                 last_preemption_fence: AtomicU32::new(0),
                 last_submitted_timestamp: AtomicU64::new(0),
                 last_completed_timestamp: AtomicU64::new(0),
+                //completed_queue: ReorderingQueue::new(0),
+                suspend_queue: SegQueue::new(),
             }),
             fence_submissions: SpinMutex::new(SmallVec::new()),
         }? NtStatus)
     }
 
+    fn notify_hw_queue(&self, hw_queue: Arc<HwQueue>, fence: u64) {
+        let _ = hw_queue.signal_progress_fence_value(fence).inspect_err(|e|
+            error!("{}: failed to notify hw queue: {:?}", function!(), e)
+        );
+    }
+
+    /*
+    fn store_dma_completed(&self, engine: Engine, fence: u32) {
+        let engine_state = &self.engines[engine.node_ordinal() as usize];
+        engine_state.completed_queue.push(fence as _);
+        engine_state.complete(fence);
+    }
+
+    fn notify_fence(&self, engine: Engine, fence: u32, notify_cb: &dyn Fn(Engine, RangeInclusive<u32>)) {
+        let engine_state = &self.engines[engine.node_ordinal() as usize];
+        engine_state.completed_queue.push(fence as _);
+        engine_state.complete(fence);
+
+        if let Some((start, end)) = engine_state.completed_queue.pop_range().map(RangeInclusive::into_inner) {
+            notify_cb(engine, RangeInclusive::new(start as _, end as _));
+        }
+    }
+
+    // TODO: might be worth to do these in the Adapter::interrupt_routine
+    fn notify_dma_completed(&self, engine: Engine, fence: u32) {
+        self.notify_fence(engine, fence, &|engine, range| {
+            for fence in range {
+                let _ = self.interface.notify_interrupt_synchronized(Interrupt::DmaCompleted(engine, fence));
+            }
+        });
+    }
+
+    fn notify_dma_faulted(&self, engine: Engine, fence: u32) {
+        self.notify_fence(engine, fence, &|engine, range| {
+            for fence in range {
+                let _ = self.interface.notify_interrupt_synchronized(Interrupt::DmaFaulted(engine, fence));
+            }
+        });
+    }
+    */
+
     fn notify_fence(&self, engine: Engine, fence: u32, notify_cb: &dyn Fn(Engine, u32)) {
         let engine_state = &self.engines[engine.node_ordinal() as usize];
 
         let last_completed = engine_state.last_completed_fence.load(Ordering::SeqCst);
+        //let last_completed = engine_state.completed_queue.current.load(Ordering::SeqCst);
 
         if last_completed + 1 == fence {
             debug!("{}: notify immediately fence {} (last completed {})", function!(), fence, last_completed);
@@ -1566,6 +1610,10 @@ impl GpuData {
         });
     }
 
+    fn store_dma_completed(&self, engine: Engine, fence: u32) {
+        self.engines[engine.node_ordinal() as usize].pending_fences.lock().insert(fence);
+    }
+
     fn notify_dma_faulted(&self, engine: Engine, fence: u32) {
         self.notify_fence(engine, fence, &|engine, fence| {
             let _ = self.interface.notify_interrupt_synchronized(Interrupt::DmaFaulted(engine, fence));
@@ -1575,6 +1623,19 @@ impl GpuData {
     fn notify_dma_preempted(&self, engine: Engine, preemption_fence: u32, last_completed_fence: u32) {
         let _ = self.interface.notify_interrupt_synchronized(Interrupt::DmaPreempted(engine, preemption_fence, last_completed_fence));
     }
+
+    /*
+    fn notify_queued_fences(&self, engine: Engine) {
+        let engine_state = &self.engines[engine.node_ordinal() as usize];
+
+        if let Some(range) = engine_state.completed_queue.pop_range() {
+            warn!("{}: pop {:?}: {:?}", function!(), engine, range);
+            for fence in range {
+                let _ = self.interface.notify_interrupt_synchronized(Interrupt::DmaCompleted(engine, fence as _));
+            }
+        }
+    }
+    */
 
     fn notify_queued_fences(&self, engine: Engine) {
         let engine_state = &self.engines[engine.node_ordinal() as usize];
@@ -1606,6 +1667,17 @@ impl GpuData {
            let last_preemption_fence = engine_state.last_preemption_fence.swap(0, Ordering::SeqCst);
            if last_preemption_fence != 0 {
                self.notify_dma_preempted(engine, last_preemption_fence, last_completed);
+           }
+           loop {
+               let Some((context, suspend_fence)) = engine_state.suspend_queue.pop() else {
+                   break;
+               };
+               if let Some(context) = context.upgrade() {
+                   context.suspend(suspend_fence);
+                   context.notify_context_suspended();
+               } else {
+                   warn!("{}: stale context suspended", function!());
+               }
            }
         }
     }
@@ -2056,16 +2128,20 @@ impl GpuChannel {
 
         if self.data.fence.query(virtio_fence) {
             trace!("{}: notify immediately: engine {:?}, dxgk_fence {}, virtio_fence {}", function!(), engine, dxgk_fence, virtio_fence);
-            self.data.notify_dma_completed(engine, dxgk_fence);
+            self.data.store_dma_completed(engine, dxgk_fence);
         } else {
             trace!("{}: queue notification: engine {:?}, dxgk_fence {}, virtio_fence {}", function!(), engine, dxgk_fence, virtio_fence);
             self.data.fence_submissions.lock().push(FenceSubmission::new(engine, dxgk_fence, virtio_fence));
-            self.data.handle_fence_submissions();
         }
+        self.kick();
     }
 
     pub fn submit_preemption(&self, engine: Engine, preemption_fence: u32) {
         self.data.engines[engine.node_ordinal() as usize].last_preemption_fence.store(preemption_fence, Ordering::SeqCst);
+    }
+
+    pub fn submit_suspend(&self, context: &Arc<Context>, suspend_fence: u64) {
+        self.data.engines[context.engine.node_ordinal() as usize].suspend_queue.push((Arc::downgrade(context), suspend_fence));
     }
 
     pub fn submit_command(&self, engine: Engine, fence: u32, cmd: &Command, allocations: Option<AllocationsBatch>) -> Result<(), NtStatus> {
@@ -2073,7 +2149,8 @@ impl GpuChannel {
         self.data.engines[engine.node_ordinal() as usize].submit(fence);
 
         if cmd.id == CommandId::Nop {
-            self.data.notify_dma_completed(engine, fence);
+            self.data.store_dma_completed(engine, fence);
+            self.kick();
 
             return Ok(());
         }
@@ -2116,15 +2193,23 @@ impl GpuChannel {
         // This shouldn't really happen, but just in case
         if let Some(alloc) = Arc::into_inner(allocations) {
             drop(alloc);
-            self.data.notify_dma_completed(engine, fence);
+            self.data.store_dma_completed(engine, fence);
+            self.kick();
         }
 
         Ok(())
     }
 
-    pub fn submit_command_buffer(&self, engine: Engine, fence: u32, ctx_id: NonZero<u32>, ring: Option<u8>, data: &[u8]) -> Result<(), NtStatus> {
-        trace!("{}: engine {:?}, fence {}, ctx {}, ring {:?}, data {:?}", function!(), engine, fence, ctx_id, ring, data);
-        self.data.engines[engine.node_ordinal() as usize].submit(fence);
+    pub fn submit_command_buffer(&self, callback: SubmitCommandCallback, ctx_id: NonZero<u32>, ring: Option<u8>, data: &[u8]) -> Result<(), NtStatus> {
+        trace!("{}: callback {:?}, ctx {}, ring {:?}, data {:?}", function!(), callback, ctx_id, ring, data);
+        match callback {
+            SubmitCommandCallback::DmaCompleted(engine, fence) | SubmitCommandCallback::DmaCompletedWithAllocations(engine, fence, _) | SubmitCommandCallback::DmaCompletedBatched(engine, fence, _) => {
+                self.data.engines[engine.node_ordinal() as usize].submit(fence);
+            },
+            SubmitCommandCallback::DmaCompletedHwQueue(ref hw_queue, fence) => {
+                hw_queue.submit(fence);
+            },
+        }
 
         let hdr = gpu::CmdSubmit3D {
             header: self.new_header(gpu::Command::SUBMIT_3D, true, Some(ctx_id), ring),
@@ -2135,9 +2220,7 @@ impl GpuChannel {
         let input = MaybeInlineBuffer::try_from_hdr_with_body(hdr, data)?;
         let output = MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?;
 
-        let callback = Callback::DmaCompleted(engine, fence);
-
-        self.control.request_async_buf(input, output, callback)
+        self.control.request_async_buf(input, output, callback.into())
     }
 
     pub fn submit_command_buffer_with_fence(&self, engine: Engine, ctx_id: NonZero<u32>, ring: Option<u8>, data: &[u8]) -> Result<u64, NtStatus> {
@@ -2288,12 +2371,14 @@ impl GpuChannel {
 
 const _: () = assert!(size_of::<GpuChannel>() == 24);
 
+// TODO: bad name
 pub struct QueueHandler {
     pci_transport: PciTransport,
     control: ControlQueue,
     cursor: CursorQueue,
     data: Arc<GpuData>,
     pub chan: GpuChannel,
+    // TODO: bad name. Maybe scheduler thread?
     thread: Pin<Box<Thread>>,
 }
 
@@ -2349,6 +2434,7 @@ impl QueueHandler {
 
     pub fn last_completed_fence(&self, engine: Engine) -> u32 {
         self.data.engines[engine.node_ordinal() as usize].last_completed_fence.load(Ordering::SeqCst)
+        //self.data.engines[engine.node_ordinal() as usize].completed_queue.current.load(Ordering::SeqCst) as _
     }
 
     pub fn last_submitted_fence(&self, engine: Engine) -> u32 {
@@ -2363,16 +2449,6 @@ impl QueueHandler {
         let control_msg = chan.control.get_queue_event();
         let cursor_msg = chan.cursor.get_queue_event();
         let events = self.thread.events();
-
-        //let last_completed_fence = &self.last_completed_fence;
-        //let fence_queue = &self.fence_queue;
-        //let interface = &self.data.interface;
-
-        //let notify_dma = |engine: Engine, fence: u32| {
-        //    debug!("{}: engine {:?} fence completed: {}", function!(), engine, fence);
-        //    chan.data.notify_dma_completed(engine, fence);
-        //    Ok(())
-        //};
 
         loop {
             // TODO: timeout (1s) => handle all in case something was missed
@@ -2412,6 +2488,10 @@ impl QueueHandler {
             };
 
             chan.data.handle_fence_submissions();
+            for node_ordinal in 0..Engine::TOTAL_COUNT {
+                let engine = Engine::try_from_node_ordinal(node_ordinal).unwrap();
+                chan.data.notify_queued_fences(engine);
+            }
 
             //trace!("- waiting for next message");
         }
@@ -2437,8 +2517,7 @@ impl QueueHandler {
     }
 
     pub fn kick(&self) {
-        self.control.chan.get_queue_event().set();
-        self.cursor.chan.get_queue_event().set();
+        self.chan.kick();
         self.thread.events().control_irq.set();
         self.thread.events().cursor_irq.set();
         self.thread.events().config_irq.set();
@@ -2458,10 +2537,6 @@ impl QueueHandler {
 
     pub fn notify_dma_preempted(&self, engine: Engine, preemption_fence: u32, last_completed_fence: u32) {
         self.data.notify_dma_preempted(engine, preemption_fence, last_completed_fence);
-    }
-
-    pub fn notify_queued_fences(&self, engine: Engine) {
-        self.data.notify_queued_fences(engine);
     }
 }
 

@@ -9,7 +9,7 @@ use uart_16550::{Config, Uart16550Tty, backend::PioBackend};
 
 type SerialPort = Uart16550Tty<PioBackend>;
 
-use crossbeam::queue::ArrayQueue;
+use crossbeam_queue::ArrayQueue;
 
 struct TimeoutMutex<T>(SpinMutex<T>);
 
@@ -105,6 +105,7 @@ impl<const MAX_LEN: usize> BufferWriter<MAX_LEN> {
 const SERIAL_PORT: u16 = 0x3f8;
 struct Logger {
     uart: TimeoutMutex<Option<SerialPort>>,
+    // TODO: thingbuf::StaticThingBuf with push_ref might be more efficient
     msgs: Option<ArrayQueue<LogEntry>>,
 }
 
@@ -207,10 +208,15 @@ pub unsafe fn force_flush() {
 }
 
 impl Logger {
-    fn try_flush(&self) {
-        let Some(mut uart) = self.uart.try_lock_timeout(10_000) else {
+    fn try_flush(&self, entry: Option<LogEntry>) {
+        let mut uart = if let Some(entry) = entry {
+            self.uart.lock()
+        } else if let Some(uart) = self.uart.try_lock_timeout(10_000) {
+            uart
+        } else {
             return;
         };
+
         let len = self.msgs.as_ref().unwrap().len();
         for i in 0..len {
             let Some(entry) = self.msgs.as_ref().unwrap().pop() else {
@@ -249,9 +255,8 @@ impl Log for Logger {
             record.args()
         ).unwrap();
 
-        self.msgs.as_ref().unwrap().force_push(entry);
-
-        self.try_flush();
+        let old_entry = self.msgs.as_ref().unwrap().force_push(entry);
+        self.try_flush(old_entry);
 
         /*
 

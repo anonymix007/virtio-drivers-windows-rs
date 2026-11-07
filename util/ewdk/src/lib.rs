@@ -105,7 +105,7 @@ pub fn ewdk() -> EwdkConfig {
     ewdk_config
 }
 
-const DXGKDDI_INTERFACE_VERSION: &'static str = "DXGKDDI_INTERFACE_VERSION_WDDM2_0";
+const DXGKDDI_INTERFACE_VERSION: &'static str = "DXGKDDI_INTERFACE_VERSION_WDDM2_9";
 
 pub fn ewdk_cc() -> cc::Build {
     let ewdk_config = ewdk();

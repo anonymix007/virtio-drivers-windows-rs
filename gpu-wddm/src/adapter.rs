@@ -31,6 +31,7 @@ use core::{
     num::NonZero,
     convert::Infallible,
     cell::UnsafeCell,
+    ops::RangeInclusive,
 };
 
 use alloc::{
@@ -450,6 +451,17 @@ impl BarMapping {
     }
 }
 
+#[derive(Debug)]
+pub enum Interrupt {
+    // TODO: can we batch DmaCompleted and DmaFaulted?
+    DmaCompleted(Engine, u32),
+    DmaPreempted(Engine, u32, u32),
+    DmaFaulted(Engine, u32),
+    VSync([Option<PHYSICAL_ADDRESS>; 16]),
+    MonitoredFenceSignaled(Engine),
+    SuspendContextCompleted(HANDLE, u64),
+}
+
 static MAPPED_BARS: [BarMapping; 6] = [const { BarMapping::none() }; 6];
 
 pub struct DxgkInterface {
@@ -589,7 +601,7 @@ impl DxgkInterface {
 
             match context.interrupt {
                 Interrupt::DmaCompleted(engine, fence) => {
-                    //trace!("{}: fence {}", function!(), fence);
+                    trace!("{}: engine {:?}, fence {:?}", function!(), engine, fence);
 
                     let mut interrupt: DXGKARGCB_NOTIFY_INTERRUPT_DATA = unsafe { zeroed() };
                     interrupt.InterruptType = DXGK_INTERRUPT_TYPE::DXGK_INTERRUPT_DMA_COMPLETED;
@@ -622,18 +634,19 @@ impl DxgkInterface {
                     true as _
                 },
                 Interrupt::DmaFaulted(engine, fence) => {
-                    error!("{}: engine {:?}, faulted fence {}", function!(), engine, fence);
+                    error!("{}: engine {:?}, faulted fence {:?}", function!(), engine, fence);
 
                     let mut interrupt: DXGKARGCB_NOTIFY_INTERRUPT_DATA = unsafe { zeroed() };
                     interrupt.InterruptType = DXGK_INTERRUPT_TYPE::DXGK_INTERRUPT_DMA_PAGE_FAULTED;
 
                     let dma_faulted = unsafe { interrupt.__bindgen_anon_1.DmaPageFaulted.as_mut() };
-                    dma_faulted.FaultedFenceId = fence;
+
                     dma_faulted.FaultedPrimitiveAPISequenceNumber = u64::MAX;
                     dma_faulted.FaultedPipelineStage = DXGK_RENDER_PIPELINE_STAGE::DXGK_RENDER_PIPELINE_STAGE_UNKNOWN;
                     dma_faulted.FaultedBindTableEntry = DXGK_BIND_TABLE_ENTRY_UNKNOWN;
                     dma_faulted.PageFaultFlags = DXGK_PAGE_FAULT_FLAGS::DXGK_PAGE_FAULT_ENGINE_RESET_REQUIRED;
                     //dma_faulted.PageFaultFlags = DXGK_PAGE_FAULT_FLAGS::DXGK_PAGE_FAULT_ADAPTER_RESET_REQUIRED;
+                    dma_faulted.FaultedFenceId = fence;
                     dma_faulted.NodeOrdinal = engine.node_ordinal();
                     dma_faulted.EngineOrdinal = 0;
                     //dma_faulted.FaultErrorCode.set_IsDeviceSpecificCode(true); // timeout
@@ -662,11 +675,35 @@ impl DxgkInterface {
 
                         context.interface.notify_interrupt(interrupt);
                     }
+                    context.interface.queue_dpc();
+                    true as _
+                },
+                Interrupt::MonitoredFenceSignaled(engine) => {
+                    let mut interrupt: DXGKARGCB_NOTIFY_INTERRUPT_DATA = unsafe { zeroed() };
+                    interrupt.InterruptType = DXGK_INTERRUPT_TYPE::DXGK_INTERRUPT_MONITORED_FENCE_SIGNALED;
+
+                    let monitored_fence = unsafe { interrupt.__bindgen_anon_1.MonitoredFenceSignaled.as_mut() };
+                    monitored_fence.NodeOrdinal = engine.node_ordinal();
+                    monitored_fence.EngineOrdinal = 0;
+
+                    context.interface.notify_interrupt(interrupt);
 
                     context.interface.queue_dpc();
-
                     true as _
-                }
+                },
+                Interrupt::SuspendContextCompleted(hw_context, fence) => {
+                    let mut interrupt: DXGKARGCB_NOTIFY_INTERRUPT_DATA = unsafe { zeroed() };
+                    interrupt.InterruptType = DXGK_INTERRUPT_TYPE::DXGK_INTERRUPT_SUSPEND_CONTEXT_COMPLETED;
+
+                    let suspend_context = unsafe { interrupt.__bindgen_anon_1.SuspendContextCompleted.as_mut() };
+                    suspend_context.hContext = hw_context;
+                    suspend_context.ContextSuspendFence = fence;
+
+                    context.interface.notify_interrupt(interrupt);
+
+                    context.interface.queue_dpc();
+                    true as _
+                },
             }
         }
 
@@ -684,7 +721,12 @@ impl DxgkInterface {
             interface: self,
             interrupt,
         };
-        self.synchronize_execution(synchronize_routine, &mut context as *mut _ as _, 0)
+
+        if wdm::ke_get_current_irql() <= DISPATCH_LEVEL {
+            self.synchronize_execution(synchronize_routine, &mut context as *mut _ as _, 0)
+        } else {
+            Ok(synchronize_routine(&mut context as *mut _ as _) != 0)
+        }
     }
 
     pub fn device_allocation_from_handle(&self, handle: D3DKMT_HANDLE) -> Option<Arc<DeviceSpecificAllocation>> {
@@ -795,6 +837,27 @@ impl DxgkInterface {
         let mut display_info = unsafe { zeroed() };
         dxgk_call_status!(<= APC_LEVEL | self.DxgkCbAcquirePostDisplayOwnership(&mut display_info as *mut _))?;
         Ok(display_info)
+    }
+
+    pub fn is_feature_enabled(&self, feature: DXGK_FEATURE_ID) -> Result<bool, NtStatus> {
+        let mut is_feature_enabled = DXGKARGCB_ISFEATUREENABLED {
+            DeviceHandle: unsafe { (*self.interface.get()).DeviceHandle },
+            FeatureId: feature,
+            Enabled: false as _,
+        };
+        dxgk_call_status_no_handle!(== PASSIVE_LEVEL | self.DxgkCbIsFeatureEnabled(&mut is_feature_enabled))?;
+        Ok(is_feature_enabled.Enabled != 0)
+    }
+
+    pub fn query_feature_support(&self, feature: DXGK_FEATURE_ID, driver_state: UINT) -> Result<bool, NtStatus> {
+        let mut query_feature_support = DXGKARGCB_QUERYFEATURESUPPORT {
+            DeviceHandle: unsafe { (*self.interface.get()).DeviceHandle },
+            FeatureId: feature,
+            DriverSupportState: driver_state,
+            Enabled: false as _,
+        };
+        dxgk_call_status_no_handle!(== PASSIVE_LEVEL | self.DxgkCbQueryFeatureSupport(&mut query_feature_support))?;
+        Ok(query_feature_support.Enabled != 0)
     }
 }
 
@@ -999,7 +1062,7 @@ impl<const N: usize> core::fmt::Write for Utf16BufferWriter<N> {
 #[derive(Debug, Clone, Copy)]
 pub enum Engine {
     Graphics,
-    PhysicalOther,
+    HwSched,
     Copy,
     Other(u8),
     // TODO: do we need video engine?
@@ -1007,7 +1070,7 @@ pub enum Engine {
 
 impl Engine {
     const GRAPHICS_ENGINE:    u32 = 0;
-    const PHYS_OTHER_ENGINE:  u32 = 1;
+    const HW_SCHED_ENGINE:    u32 = 1;
     const COPY_ENGINE:        u32 = 2;
     const OTHER_ENGINE_START: u32 = 3;
     const OTHER_ENGINE_COUNT: u32 = 61;
@@ -1019,7 +1082,7 @@ impl Engine {
         match index {
             Engine::GRAPHICS_ENGINE => Some(Engine::Graphics),
             Engine::COPY_ENGINE => Some(Engine::Copy),
-            Engine::PHYS_OTHER_ENGINE => Some(Engine::PhysicalOther),
+            Engine::HW_SCHED_ENGINE => Some(Engine::HwSched),
             Engine::OTHER_ENGINE_START..=Engine::OTHER_ENGINE_END => Some(Engine::Other((index - Engine::OTHER_ENGINE_START) as _)),
             _ => None,
         }
@@ -1029,7 +1092,7 @@ impl Engine {
         match self {
             Engine::Graphics => Engine::GRAPHICS_ENGINE,
             Engine::Copy => Engine::COPY_ENGINE,
-            Engine::PhysicalOther => Engine::PHYS_OTHER_ENGINE,
+            Engine::HwSched => Engine::HW_SCHED_ENGINE,
             Engine::Other(i) => {
                 let i = *i as u32;
                 assert!(i < Engine::OTHER_ENGINE_COUNT);
@@ -1038,7 +1101,7 @@ impl Engine {
         }
     }
 
-    pub fn fill_metadata(&self, metadata: &mut DXGK_NODEMETADATA) {
+    pub fn fill_metadata(&self, adapter: &Adapter, metadata: &mut DXGK_NODEMETADATA) {
         let mut name = Utf16BufferWriter::new();
         match self {
             Engine::Graphics => {
@@ -1050,9 +1113,29 @@ impl Engine {
                 metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_COPY;
                 metadata.GpuMmuSupported = true as _;
             },
-            Engine::PhysicalOther => {
+            Engine::HwSched => {
                 debug!("{}: {:?} -> DXGK_ENGINE_TYPE_OTHER (phys)", function!(), self);
                 metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_OTHER;
+                metadata.GpuMmuSupported = true as _;
+
+                if let Some(q) = adapter.queue_handler() {
+                    let interface = q.dxgk_interface();
+
+                    //let hw_scheduling = match interface.is_feature_enabled(DXGK_FEATURE_ID::DXGK_FEATURE_HWSCH) {
+                    let hw_scheduling = match interface.query_feature_support(DXGK_FEATURE_ID::DXGK_FEATURE_HWSCH, DXGK_FEATURE_SUPPORT_ALWAYS_ON) {
+                        Ok(enabled) => enabled,
+                        Err(e) => {
+                            error!("{}: failed to query feature: {:?}", function!(), e);
+                            false
+                        },
+                    };
+                    warn!("{}: hw scheduling enabled: {:?}", function!(), hw_scheduling);
+                    metadata.Flags.set_ContextSchedulingSupported(true);
+                    metadata.Flags.set_RingBufferFenceRelease(true);
+                } else {
+                    warn!("{}: no queue handler yet", function!());
+                }
+
                 let _ = write!(name, "{:?}", self);
                 metadata.FriendlyName = name.buf;
             },
@@ -1060,7 +1143,6 @@ impl Engine {
                 debug!("{}: {:?} -> DXGK_ENGINE_TYPE_OTHER", function!(), self);
                 metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_OTHER;
                 metadata.GpuMmuSupported = true as _;
-                //metadata.Flags.set_ContextSchedulingSupported(true);
                 let _ = write!(name, "{:?}", self);
                 metadata.FriendlyName = name.buf;
             },
@@ -1076,15 +1158,9 @@ impl Engine {
     */
 }
 
-#[derive(Debug)]
-pub enum Interrupt {
-    DmaCompleted(Engine, u32),
-    DmaPreempted(Engine, u32, u32),
-    DmaFaulted(Engine, u32),
-    VSync([Option<PHYSICAL_ADDRESS>; 16]),
-}
-
 impl Adapter {
+    pub const WDDM_VERSION: DXGK_WDDMVERSION = DXGK_WDDMVERSION::DXGKDDI_WDDMv2_9;
+
     fn init(device: NonNull<UnsafeCell<DEVICE_OBJECT>>) -> impl Init<Self, NtStatus> {
         init!(Self {
             tag: VIRTIO_GPU_ADAPTER_TAG,
@@ -1337,7 +1413,6 @@ impl Adapter {
         state.empty_cursor = Some(Cursor::try_new(&chan, 64, 64, 0, 0, 0, 0)?);
 
         debug!("{}: system display resolution: {:?}", function!(), system_display_resolution);
-
         // TODO: allocate Framebuffer for this
         //if num_scanouts > 0 && state.system_display_info.is_none() {
         //    let (w, h) = system_display_resolution.unwrap();
@@ -1386,10 +1461,11 @@ impl Adapter {
 
     pub fn query_info(&self, query_info: &DXGKARG_QUERYADAPTERINFO) -> Result<(), NtStatus> {
         trace!("{}: {:?}", function!(), query_info.Type);
-        let state = check_state!(self)?;
 
         match query_info.Type {
             DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_UMDRIVERPRIVATE => {
+                let state = check_state!(self)?;
+
                 let umd_priv: &mut AdapterInfo = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, AdapterInfo)?;
                 //trace!("{}: private buffer: {:?}", function!(), buf);
                 //let umd_priv: &mut AdapterInfo = TaggedExt::from_handle(query_info.pOutputData).ok_or(STATUS::INVALID_PARAMETER)?;
@@ -1404,15 +1480,15 @@ impl Adapter {
                 Ok(())
             },
             DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_DRIVERCAPS => {
+                let state = check_state!(self)?;
+
                 let driver_caps: &mut DXGK_DRIVERCAPS = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_DRIVERCAPS)?;
 
                 unsafe { *driver_caps = zeroed(); }
 
                 // TODO: choose v2/v1.3 dynamically based on the OS version
                 // Or maybe add a feature flag to build either WDDM1 or WDDM2 driver
-                driver_caps.WDDMVersion = DXGK_WDDMVERSION::DXGKDDI_WDDMv2;
-                //driver_caps.WDDMVersion = DXGK_WDDMVERSION::DXGKDDI_WDDMv2_3;
-                //driver_caps.WDDMVersion = DXGK_WDDMVERSION::DXGKDDI_WDDMv1_3;
+                driver_caps.WDDMVersion = Self::WDDM_VERSION;
                 driver_caps.HighestAcceptableAddress.QuadPart = -1i64;
 
                 //driver_caps.PreemptionCaps.GraphicsPreemptionGranularity = D3DKMDT_GRAPHICS_PREEMPTION_GRANULARITY::D3DKMDT_GRAPHICS_PREEMPTION_NONE;
@@ -1466,6 +1542,8 @@ impl Adapter {
                 Ok(())
             },
             DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT3 => {
+                let state = check_state!(self)?;
+
                 let segment_info = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_QUERYSEGMENTOUT3)?;
 
                 segment_info.NbSegment = MemorySegment::COUNT;
@@ -1525,6 +1603,8 @@ impl Adapter {
                 Ok(())
             },
             DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT4 => {
+                let state = check_state!(self)?;
+
                 let segment_info = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_QUERYSEGMENTOUT4)?;
                 trace!("{}: {:?}: stride = {}", function!(), query_info.Type, segment_info.SegmentDescriptorStride);
 
@@ -1582,15 +1662,24 @@ impl Adapter {
                 Ok(())
             },
 
-            //DXGKQAITYPE_NODEPERFDATA
-            DXGK_QUERYADAPTERINFOTYPE(24) => {
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_NODEPERFDATA => {
+                let node_perf = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_NODE_PERFDATA)?;
+                *node_perf = unsafe { zeroed() };
                 Ok(())
             },
 
-            //DXGKQAITYPE_ADAPTERPERFDATA
-            DXGK_QUERYADAPTERINFOTYPE(25) => {
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_ADAPTERPERFDATA => {
+                let adapter_perf = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_ADAPTER_PERFDATA)?;
+                *adapter_perf = unsafe { zeroed() };
                 Ok(())
             },
+
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_ADAPTERPERFDATA_CAPS => {
+                let adapter_perf_caps = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_ADAPTER_PERFDATACAPS)?;
+                *adapter_perf_caps = unsafe { zeroed() };
+                Ok(())
+            },
+
             DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_GPUMMUCAPS => {
                 trace!("{}: {:?}", function!(), query_info.Type);
                 let gpu_mmu_caps = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_GPUMMUCAPS)?;
@@ -1621,11 +1710,56 @@ impl Adapter {
                 }
             },
 
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYCOLORIMETRYOVERRIDES => {
+                let target = check_buffer_size!(query_info.pInputData, query_info.InputDataSize, DXGK_QAITARGETIN)?;
+                let colorimetry = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_COLORIMETRY)?;
+
+                *colorimetry = unsafe { zeroed() };
+
+                Ok(())
+            }
+
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_DISPLAYID_DESCRIPTOR => {
+                let target = check_buffer_size!(query_info.pInputData, query_info.InputDataSize, DXGK_QAITARGETIN)?;
+                let display_id = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_QUERYDISPLAYIDOUT)?;
+
+                *display_id = unsafe { zeroed() };
+                let edid = self.get_edid(target.TargetId as usize)?;
+                display_id.pDescriptor = edid.as_ptr() as _;
+                display_id.Length = edid.len() as _;
+
+                Ok(())
+            }
+
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_GPUVERSION => {
+                let gpu_version = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_GPUVERSION)?;
+
+                let mut bios_version = Utf16BufferWriter::new();
+                let mut gpu_architecture = Utf16BufferWriter::new();
+
+                let _ = write!(bios_version, "{}-{}", crate::BUILD_VERSION, crate::BUILD_DATE);
+                let _ = write!(gpu_architecture, "VirtIO GPU");
+
+                gpu_version.BiosVersion = bios_version.buf;
+                gpu_version.GpuArchitecture = gpu_architecture.buf;
+
+                Ok(())
+            }
+
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_WDDMDEVICECAPS => {
+                let device_caps = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_WDDMDEVICECAPS)?;
+
+                device_caps.WDDMVersion = Self::WDDM_VERSION;
+
+                Ok(())
+            }
+
             _ => {
                 //if query_info.Type.0 != 24 && query_info.Type.0 != 25 {
                     trace!("unknown adapter info type: {:?}", query_info.Type);
                 //}
-                Err(NtStatus(STATUS::NOT_SUPPORTED))
+                Err(NtStatus(STATUS::NOT_IMPLEMENTED))
+                //Err(NtStatus(STATUS::NOT_SUPPORTED))
             },
         }
     }
@@ -1879,7 +2013,7 @@ impl Adapter {
                     return Err(NtStatus(STATUS::INVALID_PARAMETER));
                 };
 
-                let context = <DeviceContext as TaggedExt>::from_arc_handle_clone(escape.hContext).ok_or(STATUS::INVALID_PARAMETER)?;
+                let context = <Context as TaggedExt>::from_arc_handle_clone(escape.hContext).ok_or(STATUS::INVALID_PARAMETER)?;
                 let ctx_id = context.device.context().ok_or(STATUS::REINITIALIZATION_NEEDED)?;
 
                 let fence_id = state.queue_handler.chan.submit_command_buffer_with_fence(context.engine, ctx_id, hdr.ring(), data)?;
@@ -1992,17 +2126,6 @@ impl Adapter {
         state.queue_handler.kick();
     }
 
-    pub fn notify_queued_fences(&self) {
-        let Ok(state) = check_state!(self) else {
-            return;
-        };
-
-        for node_ordinal in 0..Engine::TOTAL_COUNT {
-            let engine = Engine::try_from_node_ordinal(node_ordinal).unwrap();
-            state.queue_handler.notify_queued_fences(engine);
-        }
-    }
-
     pub fn notify_dma_preempted(&self, engine: Engine, preemption_fence: u32, last_completed_fence: u32) {
         let Ok(state) = check_state!(self) else {
             return;
@@ -2027,6 +2150,7 @@ impl Adapter {
         state.queue_handler.last_submitted_fence(engine)
     }
 
+    // TODO: there's a lot of duplication between different submit methods
     pub fn submit_command(&self, submit_command: &DXGKARG_SUBMITCOMMAND) -> Result<(), NtStatus> {
         if submit_command.pDmaBufferPrivateData.is_null() {
             error!("{}: no dma private data", function!());
@@ -2036,7 +2160,7 @@ impl Adapter {
         let chan = &state.queue_handler.chan;
         let fence = submit_command.SubmissionFenceId;
 
-        let engine = if let Some(context) = <DeviceContext as TaggedExt>::from_handle_silent(unsafe { submit_command.__bindgen_anon_1.hContext }) {
+        let engine = if let Some(context) = <Context as TaggedExt>::from_handle_silent(unsafe { submit_command.__bindgen_anon_1.hContext }) {
             context.engine
         } else {
             Engine::try_from_node_ordinal(submit_command.NodeOrdinal).unwrap()
@@ -2149,7 +2273,7 @@ impl Adapter {
             error!("{}: tried to resubmit preempted command: {:?}", function!(), submit_command);
         }
 
-        let (engine, ctx) = if let Some(context) = <DeviceContext as TaggedExt>::from_handle_silent(submit_command.hContext) {
+        let (engine, ctx) = if let Some(context) = <Context as TaggedExt>::from_handle_silent(submit_command.hContext) {
             (context.engine, context.device.context())
         } else {
             (Engine::try_from_node_ordinal(submit_command.NodeOrdinal).unwrap(), None)
@@ -2240,12 +2364,12 @@ impl Adapter {
             match body {
                 CommandBody::Submit(data) => {
                     let ctx = ctx.ok_or(STATUS::INVALID_PARAMETER).inspect_err(|e| {
-                        let ctx = <DeviceContext as TaggedExt>::from_handle(submit_command.hContext);
-                        error!("{}: command validation failed: invalid DeviceContext: {:?}", function!(), ctx);
+                        let ctx = <Context as TaggedExt>::from_handle(submit_command.hContext);
+                        error!("{}: command validation failed: invalid Context: {:?}", function!(), ctx);
                     })?;
                     debug!("{}: header: {:?}, ring: {:?}, ctx: {}", function!(), hdr, hdr.ring(), ctx);
 
-                    return chan.submit_command_buffer(engine, fence, ctx, hdr.ring(), data);
+                    return chan.submit_command_buffer(SubmitCommandCallback::DmaCompleted(engine, fence), ctx, hdr.ring(), data);
                 },
                 CommandBody::Fence(virtio_fence) => {
                     trace!("{}: engine {:?}, dxgk_fence {}, virtio_fence {}", function!(), engine, fence, virtio_fence);
@@ -2293,12 +2417,100 @@ impl Adapter {
         Ok(())
     }
 
+    pub fn submit_command_to_hw_queue(&self, submit_command: &DXGKARG_SUBMITCOMMANDTOHWQUEUE) -> Result<(), NtStatus> {
+        let state = check_state!(self)?;
+        let chan = &state.queue_handler.chan;
+        let current_fence = submit_command.HwQueueProgressFenceId;
+        let hw_queue = <HwQueue as TaggedExt>::from_arc_handle_clone(submit_command.hHwQueue).ok_or(STATUS::INVALID_PARAMETER)?;
+
+        if submit_command.pDmaBufferPrivateData.is_null() {
+            error!("{}: no dma private data", function!());
+            return Err(NtStatus(STATUS::INVALID_PARAMETER));
+        }
+
+        let Some(fence_cpu_va) = NonNull::new(submit_command.HwQueueProgressFenceCpuVa as *mut u8).and_then(NonNull::try_cast_aligned::<u64>) else {
+            error!("{}: invalid progress fence CPU virtual address: {:?}", function!(), submit_command.HwQueueProgressFenceCpuVa);
+            return Err(NtStatus(STATUS::INVALID_PARAMETER));
+        };
+
+        if fence_cpu_va != hw_queue.fence_cpu_va {
+            error!("{}: hw queue fence address != submit fence address ({:?} != {:?})", function!(), fence_cpu_va, hw_queue.fence_cpu_va);
+            return Err(NtStatus(STATUS::INVALID_PARAMETER));
+        }
+
+        let last_fence = hw_queue.context.last_submitted_fence();
+        if last_fence + 1 != current_fence {
+            error!("{}: missed fence id: last + 1 != current: {:?} + 1 != {:?}", function!(), last_fence, current_fence);
+            return Err(NtStatus(STATUS::INVALID_PARAMETER));
+        }
+
+        let submit_usermode = <SubmitCommand as TaggedExt>::from_handle_silent(submit_command.pDmaBufferPrivateData).ok_or(STATUS::INVALID_PARAMETER)?;
+        let priv_size = submit_command.DmaBufferPrivateDataSize as usize;
+
+        let mut command_offset = 0;
+        let cmd = submit_usermode.command_slice(priv_size);
+
+        let (hdr, _) = CommandHeaderRaw::ref_from_prefix(cmd).map_err(|e| {
+            error!("{}: failed to read raw command header: {:?}", function!(), e);
+            STATUS::INVALID_PARAMETER
+        })?;
+        command_offset += size_of::<CommandHeaderRaw>();
+
+        let hdr = hdr.try_as_hdr().map_err(|e| {
+            error!("{}: command validation failed: {}", function!(), e);
+            STATUS::INVALID_PARAMETER
+        })?;
+
+        if hdr.shadow_virgl() {
+            error!("{}: command validation failed: shadow virgl from usermode is not supported", function!());
+            return Err(NtStatus(STATUS::INVALID_PARAMETER));
+        }
+
+        let body = hdr.command_slice().map_err(|e| {
+            error!("{}: command validation failed: {}", function!(), e);
+            STATUS::INVALID_PARAMETER
+        })?;
+
+        command_offset += hdr.size as usize;
+
+        if command_offset != cmd.len() {
+            error!("{}: command validation failed: too many commands", function!());
+            return Err(NtStatus(STATUS::INVALID_PARAMETER));
+        }
+
+        match body {
+            CommandBody::Submit(data) => {
+                let ctx = hw_queue.context.device.context();
+                debug!("{}: header: {:?}, ring: {:?}, ctx: {:?}", function!(), hdr, hdr.ring(), ctx);
+                let ctx = ctx.ok_or(STATUS::REINITIALIZATION_NEEDED)?;
+
+                chan.submit_command_buffer(SubmitCommandCallback::DmaCompletedHwQueue(hw_queue, current_fence), ctx, hdr.ring(), data)
+
+                // TODO: wait here until not actually submitted or at least until there is enough space
+                // Notification event when queue is <80% full would probably do for UMD submissions and
+                // we don't support KMD hw queue submissions anyway
+            },
+            _ => {
+                error!("{}: command validation failed: unsupported type: {:?}", function!(), hdr);
+                Err(NtStatus(STATUS::INVALID_PARAMETER))
+            },
+        }
+    }
+
     pub fn submit_preemption(&self, engine: Engine, preemption_fence: u32) {
         trace!("{}", function!());
         let Ok(state) = check_state!(self) else {
             return;
         };
         state.queue_handler.chan.submit_preemption(engine, preemption_fence);
+    }
+
+    pub fn submit_suspend(&self, context: &Arc<Context>, suspend_fence: u64) {
+        trace!("{}", function!());
+        let Ok(state) = check_state!(self) else {
+            return;
+        };
+        state.queue_handler.chan.submit_suspend(context, suspend_fence);
     }
 
     pub fn allocate_full(chan: &GpuChannel, create_allocation: &mut DXGKARG_CREATEALLOCATION) -> Result<(), NtStatus> {
@@ -2776,6 +2988,25 @@ impl Adapter {
         Ok(())
     }
 
+    pub fn update_monitor_link_info(&self, update_monitor_link_info: &mut DXGKARG_UPDATEMONITORLINKINFO) -> Result<(), NtStatus> {
+        trace!("{}", function!());
+
+        let scanout = update_monitor_link_info.VideoPresentTargetId as usize;
+        let state = check_state!(self)?;
+
+        if scanout >= state.num_scanouts as usize {
+            error!("{}: invalid scanout {}: out of range (max {})", function!(), scanout, state.num_scanouts);
+            return Err(NtStatus(STATUS::INVALID_PARAMETER));
+        }
+
+        // TODO: HDR
+        // update_monitor_link_info.MonitorLinkInfo.Capabilities
+
+        update_monitor_link_info.MonitorLinkInfo.DitheringSupport.set_Rgb(D3DKMDT_BITS_PER_COMPONENT_08);
+
+        Ok(())
+    }
+
     pub fn targets_for_source(&self, source: D3DDDI_VIDEO_PRESENT_SOURCE_ID) -> Result<&[D3DDDI_VIDEO_PRESENT_TARGET_ID], NtStatus> {
         trace!("{}", function!());
         let state = check_state!(self)?;
@@ -3069,11 +3300,13 @@ impl Adapter {
                             D3DKMDT_MODE_PREFERENCE::D3DKMDT_MP_NOTPREFERRED
                         };
 
-                        mode_info.Preference = preference;
+                        //mode_info.Preference = preference;
 
-                        //unsafe {
-                        //    mode_info.__bindgen_anon_1.__bindgen_anon_1.set_Preference(preference);
-                        //}
+
+                        unsafe {
+                            mode_info.__bindgen_anon_1.WireFormatAndPreference.set_Preference(preference);
+                            mode_info.__bindgen_anon_1.WireFormatAndPreference.set_Rgb(D3DKMDT_BITS_PER_COMPONENT_08);
+                        }
 
                         target_mode_set.add_mode_autorelease(mode_info)?;
                     }

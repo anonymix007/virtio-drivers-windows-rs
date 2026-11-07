@@ -63,7 +63,7 @@ pub const VIRTIO_GPU_INVALID_TAG: u64 = 0xDEAD_DEAD_DEAD_DEAD;
 
 use crate::uapi::{Tagged, TaggedExt, CreateAllocation, CreateResource, Allocate3d, Pointer64, ContextInit, ESCAPE_CONTEXT_INIT_TAG, CapsetId};
 use crate::adapter::{Adapter, NtStatus, Engine};
-use crate::device::{Device, DeviceContext};
+use crate::device::{Device, Context, HwQueue};
 use crate::allocation::Allocation;
 use crate::command::{Command, CommandDmaPrivate};
 use crate::virgl::*;
@@ -142,8 +142,8 @@ pub fn slice_from_raw_parts_mut<'a, T>(ptr: *mut T, size: usize) -> &'a mut [T] 
     }
 }
 
-const BUILD_VERSION: &'static str = env!("BUILD_VERSION");
-const BUILD_DATE:    &'static str = env!("BUILD_DATE");
+pub const BUILD_VERSION: &'static str = env!("BUILD_VERSION");
+pub const BUILD_DATE:    &'static str = env!("BUILD_DATE");
 
 #[global_allocator]
 static GLOBAL_ALLOC: WdkAllocator = WdkAllocator;
@@ -158,11 +158,8 @@ pub unsafe extern "C" fn driver_entry(
 
     warn!("starting VirtIO GPU {BUILD_VERSION} ({BUILD_DATE})");
 
-    const _: () = assert!(size_of::<DXGK_DRIVERCAPS>() == 0x240);
-
     let mut initial_data : DRIVER_INITIALIZATION_DATA = unsafe { zeroed() };
-    //initial_data.Version = DXGKDDI_INTERFACE_VERSION_WDDM2_3;
-    initial_data.Version = DXGKDDI_INTERFACE_VERSION_WDDM2_0;
+    initial_data.Version = DXGKDDI_INTERFACE_VERSION_WDDM2_9;
 
     initial_data.DxgkDdiAddDevice = Some(add_device);
     initial_data.DxgkDdiStartDevice = Some(start_device);
@@ -256,14 +253,46 @@ pub unsafe extern "C" fn driver_entry(
     initial_data.DxgkDdiSetStablePowerState = Some(set_stable_power_state);
     initial_data.DxgkDdiSetVideoProtectedRegion = Some(set_video_protected_region);
 
+    // WDDM2.1
+    //initial_data.DxgkDdiCheckMultiPlaneOverlaySupport3 = Some(check_multi_plane_overlay_support3);
+    //initial_data.DxgkDdiSetVidPnSourceAddressWithMultiPlaneOverlay3 = Some(set_vidpn_source_address_with_multiplane_overlay3);
+    //initial_data.DxgkDdiPostMultiPlaneOverlayPresent = Some(post_multi_plane_overlay_present);
+    initial_data.DxgkDdiValidateUpdateAllocationProperty = Some(validate_update_allocation_property);
+    initial_data.DxgkDdiControlModeBehavior = Some(control_mode_behaviour);
+    initial_data.DxgkDdiUpdateMonitorLinkInfo = Some(update_monitor_link_info);
+
     // WDDM2.2
-    //initial_data.DxgkDdiCreateHwContext = Some(create_hw_context);
-    //initial_data.DxgkDdiDestroyHwContext = Some(destroy_hw_context);
-    //initial_data.DxgkDdiCreateHwQueue = Some(create_hw_queue);
-    //initial_data.DxgkDdiDestroyHwQueue = Some(destroy_hw_queue);
-    //initial_data.DxgkDdiSubmitCommandToHwQueue = Some(submit_command_to_hw_queue);
-    //initial_data.DxgkDdiSwitchToHwContextList = Some(switch_to_hw_context_list);
-    //initial_data.DxgkDdiResetHwEngine = Some(reset_hw_engine);
+    initial_data.DxgkDdiCreateHwContext = Some(create_hw_context);
+    initial_data.DxgkDdiDestroyHwContext = Some(destroy_hw_context);
+    initial_data.DxgkDdiCreateHwQueue = Some(create_hw_queue);
+    initial_data.DxgkDdiDestroyHwQueue = Some(destroy_hw_queue);
+    initial_data.DxgkDdiSubmitCommandToHwQueue = Some(submit_command_to_hw_queue);
+    initial_data.DxgkDdiSwitchToHwContextList = Some(switch_to_hw_context_list);
+    initial_data.DxgkDdiResetHwEngine = Some(reset_hw_engine);
+
+    initial_data.DxgkDdiDisplayDetectControl = Some(display_detect_control);
+    initial_data.DxgkDdiQueryConnectionChange = Some(query_connection_change);
+    initial_data.DxgkDdiGetMultiPlaneOverlayCaps = Some(get_multi_plane_overlay_caps);
+    initial_data.DxgkDdiGetPostCompositionCaps = Some(get_post_composition_caps);
+
+    // WDDM2.3
+    initial_data.DxgkDdiUpdateHwContextState = Some(update_hw_context_state);
+    initial_data.DxgkDdiCreateProtectedSession = Some(create_protected_session);
+    initial_data.DxgkDdiDestroyProtectedSession = Some(destroy_protected_session);
+
+    // WDDM2.4
+    initial_data.DxgkDdiSetSchedulingLogBuffer = Some(set_scheduling_log_buffer);
+    initial_data.DxgkDdiSetupPriorityBands = Some(setup_priority_bands);
+    initial_data.DxgkDdiNotifyFocusPresent = Some(notify_focus_present);
+    initial_data.DxgkDdiSetContextSchedulingProperties = Some(set_context_scheduling_properties);
+    initial_data.DxgkDdiSuspendContext = Some(suspend_context);
+    initial_data.DxgkDdiResumeContext = Some(resume_context);
+    initial_data.DxgkDdiResumeHwEngine = Some(resume_hw_engine);
+
+    // WDDM2.5
+    //initial_data.DxgkDdiSignalMonitoredFence = Some(signal_monitored_fence);
+    initial_data.DxgkDdiPresentToHwQueue = Some(present_to_hw_queue);
+    initial_data.DxgkDdiValidateSubmitCommand = Some(validate_submit_command);
 
     let status = NtStatus::from(unsafe { DxgkInitialize(driver, registry_path, &mut initial_data) });
 
@@ -489,6 +518,8 @@ unsafe extern "C" fn query_adapter_info(adapter: HANDLE, query_adapter_info: *co
 
     match gpu.query_info(query_info) {
         Ok(()) => {
+            trace!("{}: {:?}: {:?}", function!(), query_info.Type, STATUS::SUCCESS);
+
             //if unsafe { (*query_adapter_info).Type } == DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT3 {
             //    let segment_info = unsafe { core::mem::transmute::<_, &DXGK_QUERYSEGMENTOUT3>((*query_adapter_info).pOutputData) };
             //
@@ -533,9 +564,19 @@ unsafe extern "C" fn query_adapter_info(adapter: HANDLE, query_adapter_info: *co
 
             STATUS::SUCCESS
         },
-        Err(NtStatus(STATUS::NOT_SUPPORTED)) => STATUS::NOT_SUPPORTED,
+        Err(NtStatus(STATUS::NOT_SUPPORTED)) => {
+            debug!("{}: {:?}: {:?}", function!(), query_info.Type, STATUS::NOT_SUPPORTED);
+
+            STATUS::NOT_SUPPORTED
+        },
+
+        Err(NtStatus(STATUS::NOT_IMPLEMENTED)) => {
+            debug!("{}: {:?}: {:?}", function!(), query_info.Type, STATUS::NOT_IMPLEMENTED);
+
+            STATUS::NOT_IMPLEMENTED
+        },
         Err(status) => {
-            error!("failed to query adapter info: {:?}", status);
+            error!("failed to query adapter info {:?}: {:?}", query_info.Type, status);
             status.0
         },
     }.to_u32()
@@ -543,15 +584,16 @@ unsafe extern "C" fn query_adapter_info(adapter: HANDLE, query_adapter_info: *co
 
 unsafe extern "C" fn get_node_metadata(adapter: HANDLE, node_ordinal: UINT, get_node_metadata: *mut DXGKARG_GETNODEMETADATA) -> NTSTATUS {
     trace!("{}", function!());
-
+    let gpu = check_handle!(adapter: Adapter);
     let get_node_metadata = check_arg!(mut get_node_metadata);
 
     let Some(engine) = Engine::try_from_node_ordinal(node_ordinal) else {
         trace!("unsupported node: {}", node_ordinal);
         return STATUS::INVALID_PARAMETER.to_u32();
     };
+
     *get_node_metadata = unsafe { zeroed() };
-    engine.fill_metadata(get_node_metadata);
+    engine.fill_metadata(gpu, get_node_metadata);
     trace!("report node {}: {:?}", node_ordinal, engine);
 
     STATUS::SUCCESS.to_u32()
@@ -1168,7 +1210,7 @@ unsafe extern "C" fn create_context(device: HANDLE, create_context: *mut DXGKARG
         return STATUS::INVALID_PARAMETER.to_u32();
     };
 
-    let context = match device.dxgk_context(engine) {
+    let context = match device.create_context(engine, create_context.hContext) {
         Ok(context) => context,
         Err(e) => {
             error!("{}: failed to create dxgk context for {:?}: {:?}", function!(), engine, e);
@@ -1211,7 +1253,7 @@ unsafe extern "C" fn create_context(device: HANDLE, create_context: *mut DXGKARG
         }
     } else {
         match engine {
-            Engine::Graphics | Engine::PhysicalOther => {
+            Engine::Graphics => {
                 create_context.hContext = TaggedExt::into_arc_handle(context);
                 create_context.ContextInfo.DmaBufferSegmentSet = 0;
                 create_context.ContextInfo.DmaBufferSize = /*8 **/ 1024 * 1024;
@@ -1219,7 +1261,11 @@ unsafe extern "C" fn create_context(device: HANDLE, create_context: *mut DXGKARG
                 create_context.ContextInfo.AllocationListSize = 1024;
                 create_context.ContextInfo.PatchLocationListSize = 1024;
             },
-           Engine::Copy | Engine::Other(_) => {
+            Engine::Copy | Engine::Other(_) => {
+                if create_context.Flags.HwQueueSupported() {
+                    error!("{}: creating hw context on non-hw node {:?}", function!(), engine);
+                }
+
                 create_context.hContext = TaggedExt::into_arc_handle(context);
                 create_context.ContextInfo.DmaBufferSegmentSet = 0;
                 create_context.ContextInfo.DmaBufferSize = 0;
@@ -1229,6 +1275,20 @@ unsafe extern "C" fn create_context(device: HANDLE, create_context: *mut DXGKARG
                 create_context.ContextInfo.Caps.set_NoPatchingRequired(true);
                 create_context.ContextInfo.Caps.set_DriverManagesResidency(true);
             },
+            Engine::HwSched => {
+                if !create_context.Flags.HwQueueSupported() {
+                    error!("{}: creating non-hw context on hw node {:?}", function!(), engine);
+                }
+
+                create_context.hContext = TaggedExt::into_arc_handle(context);
+                create_context.ContextInfo.DmaBufferSegmentSet = 0;
+                create_context.ContextInfo.DmaBufferSize = 0;
+                create_context.ContextInfo.DmaBufferPrivateDataSize = uapi::MAX_SUBMIT_COMMAND_VIRTUAL_SIZE;
+                create_context.ContextInfo.AllocationListSize = 0;
+                create_context.ContextInfo.PatchLocationListSize = 0;
+                create_context.ContextInfo.Caps.set_NoPatchingRequired(true);
+                create_context.ContextInfo.Caps.set_DriverManagesResidency(true);
+            }
         }
     }
 
@@ -1243,14 +1303,14 @@ unsafe extern "C" fn destroy_context(context: HANDLE) -> NTSTATUS {
         return STATUS::INVALID_PARAMETER.to_u32();
     }
 
-    unsafe { drop(Arc::from_raw(context as *mut DeviceContext)); }
+    unsafe { drop(Arc::from_raw(context as *mut Context)); }
 
     STATUS::SUCCESS.to_u32()
 }
 
 unsafe extern "C" fn present(context: HANDLE, present: *mut DXGKARG_PRESENT) -> NTSTATUS {
     trace!("{}", function!());
-    let context = check_handle_arc!(context: DeviceContext);
+    let context = check_handle_arc!(context: Context);
     let present = check_arg!(mut present);
     //debug!("{}: {:?}", function!(), present);
 
@@ -1266,7 +1326,7 @@ unsafe extern "C" fn present(context: HANDLE, present: *mut DXGKARG_PRESENT) -> 
 unsafe extern "C" fn render(context: HANDLE, render: *mut DXGKARG_RENDER) -> NTSTATUS {
     trace!("{}", function!());
 
-    let context = check_handle_arc!(context: DeviceContext);
+    let context = check_handle_arc!(context: Context);
     let render = check_arg!(mut render);
 
     if render.DmaBufferSegmentId != 0 {
@@ -1551,7 +1611,6 @@ unsafe extern "C" fn preempt_command(adapter: HANDLE, preempt_command: *const DX
     let engine = Engine::try_from_node_ordinal(preempt_command.NodeOrdinal).unwrap();
 
     gpu.kick_queue_handler();
-    gpu.notify_queued_fences();
 
     let last_completed = gpu.last_completed_fence(engine);
     let last_submitted = gpu.last_submitted_fence(engine);
@@ -1564,7 +1623,6 @@ unsafe extern "C" fn preempt_command(adapter: HANDLE, preempt_command: *const DX
         assert!(preempt_command.PreemptionFenceId != 0);
         gpu.submit_preemption(engine, preempt_command.PreemptionFenceId);
         gpu.kick_queue_handler();
-        gpu.notify_queued_fences();
     }
 
     STATUS::SUCCESS.to_u32()
@@ -1586,7 +1644,6 @@ unsafe extern "C" fn query_current_fence(adapter: HANDLE, current_fence: *mut DX
     let engine = Engine::try_from_node_ordinal(current_fence.NodeOrdinal).unwrap();
 
     gpu.kick_queue_handler();
-    gpu.notify_queued_fences();
 
     let last_completed = gpu.last_completed_fence(engine);
     let last_submitted = gpu.last_submitted_fence(engine);
@@ -1625,7 +1682,6 @@ unsafe extern "C" fn query_dependent_engine_group(adapter: HANDLE, query: *mut D
     let engine = Engine::try_from_node_ordinal(query.NodeOrdinal).unwrap();
 
     gpu.kick_queue_handler();
-    gpu.notify_queued_fences();
 
     let last_completed = gpu.last_completed_fence(engine);
     let last_submitted = gpu.last_submitted_fence(engine);
@@ -1714,42 +1770,183 @@ unsafe extern "C" fn submit_command_virtual(adapter: HANDLE, submit_command_virt
     }.to_u32()
 }
 
-/*
-pub unsafe extern "C" fn create_hw_context(device: HANDLE, create_hw_context: *mut DXGKARG_CREATEHWCONTEXT) -> NTSTATUS {
+
+unsafe extern "C" fn create_hw_context(device: HANDLE, create_hw_context: *mut DXGKARG_CREATEHWCONTEXT) -> NTSTATUS {
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
 }
 
-pub unsafe extern "C" fn destroy_hw_context(context: HANDLE) -> NTSTATUS {
+unsafe extern "C" fn destroy_hw_context(context: HANDLE) -> NTSTATUS {
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
 }
 
-pub unsafe extern "C" fn create_hw_queue(context: HANDLE, create_hw_queue: *mut DXGKARG_CREATEHWQUEUE) -> NTSTATUS {
+unsafe extern "C" fn create_hw_queue(context: HANDLE, create_hw_queue: *mut DXGKARG_CREATEHWQUEUE) -> NTSTATUS {
+    trace!("{}", function!());
+
+    let context = check_handle_arc!(context: Context);
+    let create_hw_queue = check_arg!(mut create_hw_queue);
+
+    let hw_queue = match context.create_hw_queue(create_hw_queue) {
+        Ok(context) => context,
+        Err(e) => {
+            error!("{}: failed to create hw context for {:?}: {:?}", function!(), context, e);
+            return e.to_u32();
+        },
+    };
+
+    create_hw_queue.hHwQueue = TaggedExt::into_arc_handle(hw_queue);
+
+    STATUS::SUCCESS.to_u32()
+}
+
+unsafe extern "C" fn destroy_hw_queue(hw_queue: HANDLE) -> NTSTATUS {
+    trace!("{}", function!());
+
+    if hw_queue.is_null() {
+        error!("{}: hw queue is null", function!());
+        return STATUS::INVALID_PARAMETER.to_u32();
+    }
+
+    unsafe { drop(Arc::from_raw(hw_queue as *mut HwQueue)); }
+
+    STATUS::SUCCESS.to_u32()
+}
+
+unsafe extern "C" fn submit_command_to_hw_queue(adapter: HANDLE, submit_command_to_hw_queue: *const DXGKARG_SUBMITCOMMANDTOHWQUEUE) -> NTSTATUS {
+    trace!("{}", function!());
+
+    let gpu = check_handle!(adapter: Adapter);
+    let submit_command_to_hw_queue = check_arg!(submit_command_to_hw_queue);
+
+    //{
+    //    let hw_queue = check_handle!(submit_command_to_hw_queue.hHwQueue: HwQueue);
+    //    warn!("{}: {:?}: {}", function!(), hw_queue.context.dxgk, submit_command_to_hw_queue.HwQueueProgressFenceId);
+    //}
+
+    match gpu.submit_command_to_hw_queue(submit_command_to_hw_queue) {
+        Ok(()) => STATUS::SUCCESS,
+        Err(status) => {
+            error!("failed to submit command to hw queue: {:?}", status);
+            status.0
+        },
+    }.to_u32()
+}
+
+unsafe extern "C" fn switch_to_hw_context_list(adapter: HANDLE, switch_to_hw_context_list: *const DXGKARG_SWITCHTOHWCONTEXTLIST) -> NTSTATUS {
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
 }
 
-pub unsafe extern "C" fn destroy_hw_queue(hw_queue: HANDLE) -> NTSTATUS {
+unsafe extern "C" fn reset_hw_engine(adapter: HANDLE, reset_hw_engine: *mut DXGKARG_RESETHWENGINE) -> NTSTATUS {
+    // TODO: DxgkCbInvalidateHwContext
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
 }
 
-pub unsafe extern "C" fn submit_command_to_hw_queue(adapter: HANDLE, submit_command_to_hw_queue: *const DXGKARG_SUBMITCOMMANDTOHWQUEUE) -> NTSTATUS {
+unsafe extern "C" fn update_hw_context_state(adapter: HANDLE, update_hw_context_state: *const DXGKARG_UPDATEHWCONTEXTSTATE) -> NTSTATUS {
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
 }
 
-pub unsafe extern "C" fn switch_to_hw_context_list(adapter: HANDLE, switch_to_hw_context_list: *const DXGKARG_SWITCHTOHWCONTEXTLIST) -> NTSTATUS {
+unsafe extern "C" fn set_scheduling_log_buffer(adapter: HANDLE, set_scheduling_log_buffer: *const DXGKARG_SETSCHEDULINGLOGBUFFER) -> NTSTATUS {
+    trace!("{}: not implemented", function!());
+    /* no logs yet */
+    STATUS::SUCCESS.to_u32()
+}
+
+unsafe extern "C" fn setup_priority_bands(adapter: HANDLE, setup_priority_bands: *const DXGKARG_SETUPPRIORITYBANDS) -> NTSTATUS {
+    trace!("{}: not implemented", function!());
+    STATUS::SUCCESS.to_u32()
+}
+
+unsafe extern "C" fn notify_focus_present(adapter: HANDLE) -> NTSTATUS {
+    trace!("{}: not implemented", function!());
+    STATUS::SUCCESS.to_u32()
+}
+
+unsafe extern "C" fn set_context_scheduling_properties(adapter: HANDLE, set_context_scheduling_properties: *const DXGKARG_SETCONTEXTSCHEDULINGPROPERTIES) -> NTSTATUS {
+    trace!("{}: not implemented", function!());
+    STATUS::SUCCESS.to_u32()
+}
+
+unsafe extern "C" fn suspend_context(adapter: HANDLE, suspend_context: *const DXGKARG_SUSPENDCONTEXT) -> NTSTATUS {
+    trace!("{}", function!());
+    let gpu = check_handle!(adapter: Adapter);
+    let suspend_context = check_arg!(suspend_context);
+    let context = check_handle_arc!(suspend_context.hContext: Context);
+    let suspend_fence = suspend_context.contextSuspendFence;
+    debug!("{}: {:?}: suspend {}", function!(), context.dxgk, suspend_fence);
+    assert!(suspend_fence != 0);
+    context.suspend(suspend_fence);
+
+    // TODO: suspend might not be finished if the request comes at an unfortunate moment
+    // when vq progression is blocked on further vq submissions. We might want to handle
+    // mid-submission-batch suspend.
+
+    let last_completed = context.last_completed_fence();
+    let last_submitted = context.last_submitted_fence();
+
+    if last_completed == last_submitted {
+        context.notify_context_suspended();
+        STATUS::SUCCESS
+    } else {
+        gpu.submit_suspend(&context, suspend_fence);
+        gpu.kick_queue_handler();
+        STATUS::PENDING
+    }.to_u32()
+}
+
+unsafe extern "C" fn resume_context(adapter: HANDLE, resume_context: *const DXGKARG_RESUMECONTEXT) -> NTSTATUS {
+    trace!("{}", function!());
+    /* nothing to do, we only ever report suspend when every submission is completed */
+    let resume_context = check_arg!(resume_context);
+    let context = check_handle_arc!(resume_context.hContext: Context);
+    debug!("{}: {:?}: resume", function!(), context.dxgk);
+
+    STATUS::SUCCESS.to_u32()
+}
+
+unsafe extern "C" fn resume_hw_engine(adapter: HANDLE, resume_hw_engine: *mut DXGKARG_RESUMEHWENGINE) -> NTSTATUS {
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
 }
 
-pub unsafe extern "C" fn reset_hw_engine(adapter: HANDLE, reset_hw_engine: *mut DXGKARG_RESETHWENGINE) -> NTSTATUS {
+unsafe extern "C" fn signal_monitored_fence(context: HANDLE, signal_monitored_fence: *mut DXGKARG_SIGNALMONITOREDFENCE) -> NTSTATUS {
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
 }
-*/
+
+unsafe extern "C" fn present_to_hw_queue(hw_queue: HANDLE, present: *mut DXGKARG_PRESENT) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn validate_submit_command(context: HANDLE, args: *mut DXGKARG_VALIDATESUBMITCOMMAND) -> NTSTATUS {
+    trace!("{}: not implemented", function!());
+    // TODO: validate
+    STATUS::SUCCESS.to_u32()
+}
+
+unsafe extern "C" fn display_detect_control(adapter: HANDLE, display_detect_control: *const DXGKARG_DISPLAYDETECTCONTROL) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn query_connection_change(adapter: HANDLE, query_connection_change: *mut DXGKARG_QUERYCONNECTIONCHANGE) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn get_multi_plane_overlay_caps(adapter: HANDLE, multi_plane_overlay_caps: *mut DXGKARG_GETMULTIPLANEOVERLAYCAPS) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn get_post_composition_caps(adapter: HANDLE, post_composition_caps: *mut DXGKARG_GETPOSTCOMPOSITIONCAPS) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
 
 unsafe extern "C" fn set_root_page_table(adapter: HANDLE, set_page_table: *const DXGKARG_SETROOTPAGETABLE) {
     if set_page_table.is_null() {
@@ -1781,7 +1978,12 @@ unsafe extern "C" fn check_multiplane_overlay_support(adapter: HANDLE, check_mul
     STATUS::NOT_IMPLEMENTED.to_u32()
 }
 
-unsafe extern "C" fn check_multiplane_overlay_support2(adapter: HANDLE, check_multiplane_overlay_support: *mut DXGKARG_CHECKMULTIPLANEOVERLAYSUPPORT2) -> NTSTATUS {
+unsafe extern "C" fn check_multiplane_overlay_support2(adapter: HANDLE, check_multiplane_overlay_support2: *mut DXGKARG_CHECKMULTIPLANEOVERLAYSUPPORT2) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn check_multiplane_overlay_support3(adapter: HANDLE, check_multiplane_overlay_support3: *mut DXGKARG_CHECKMULTIPLANEOVERLAYSUPPORT3) -> NTSTATUS {
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
 }
@@ -1820,20 +2022,18 @@ unsafe extern "C" fn destroy_process(adapter: HANDLE, process: HANDLE) -> NTSTAT
 }
 
 unsafe extern "C" fn set_vidpn_source_address_with_multiplane_overlay(adapter: HANDLE, set_vidpn_source_address_with_multiplane_overlay: *const DXGKARG_SETVIDPNSOURCEADDRESSWITHMULTIPLANEOVERLAY) -> NTSTATUS {
+    trace!("{}", function!());
     let set_vidpn_source_address_with_multiplane_overlay = check_arg!(set_vidpn_source_address_with_multiplane_overlay);
-    error!("{}: not implemented: {:?}", function!(), set_vidpn_source_address_with_multiplane_overlay);
-
     let planes = slice_from_raw_parts(set_vidpn_source_address_with_multiplane_overlay.pPlanes, set_vidpn_source_address_with_multiplane_overlay.PlaneCount as _);
-
     let disabling_planes = planes.iter().fold(true, |d, plane| d && plane.Enabled == 0);
-
-    for plane in planes {
-        error!("{}: plane {:?}", function!(), plane);
-    }
-
     // This started failing in WDDM2.something on driver unload for whatever reason
     if disabling_planes {
         return STATUS::SUCCESS.to_u32()
+    }
+
+    error!("{}: not implemented: {:?}", function!(), set_vidpn_source_address_with_multiplane_overlay);
+    for plane in planes {
+        error!("{}: plane {:?}", function!(), plane);
     }
 
     STATUS::NOT_IMPLEMENTED.to_u32()
@@ -1842,6 +2042,55 @@ unsafe extern "C" fn set_vidpn_source_address_with_multiplane_overlay(adapter: H
 unsafe extern "C" fn set_vidpn_source_address_with_multiplane_overlay2(adapter: HANDLE, set_vidpn_source_address_with_multiplane_overlay2: *const DXGKARG_SETVIDPNSOURCEADDRESSWITHMULTIPLANEOVERLAY2) -> NTSTATUS {
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn set_vidpn_source_address_with_multiplane_overlay3(adapter: HANDLE, set_vidpn_source_address_with_multiplane_overlay3: *const DXGKARG_SETVIDPNSOURCEADDRESSWITHMULTIPLANEOVERLAY3) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn set_timings_from_vidpn(adapter: HANDLE, set_timings_from_vidpn: *mut DXGKARG_SETTIMINGSFROMVIDPN) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+/*
+unsafe extern "C" fn post_multi_plane_overlay_present(adapter: HANDLE, post_multi_plane_overlay_present: *const DXGKARG_POSTMULTIPLANEOVERLAYPRESENT) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+*/
+
+unsafe extern "C" fn validate_update_allocation_property(adapter: HANDLE, validate_update_allocation_property: *const  DXGKARG_VALIDATEUPDATEALLOCPROPERTY) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn control_mode_behaviour(adapter: HANDLE, control_mode_behaviour: *mut DXGKARG_CONTROLMODEBEHAVIOR) -> NTSTATUS {
+    trace!("{}", function!());
+    let control_mode_behaviour = check_arg!(mut control_mode_behaviour);
+
+    control_mode_behaviour.Satisfied = unsafe { zeroed() };
+    control_mode_behaviour.NotSatisfied = unsafe { zeroed() };
+
+    STATUS::SUCCESS.to_u32()
+}
+
+unsafe extern "C" fn update_monitor_link_info(adapter: HANDLE, update_monitor_link_info: *mut DXGKARG_UPDATEMONITORLINKINFO) -> NTSTATUS {
+    trace!("{}", function!());
+
+    let gpu = check_handle!(adapter: Adapter);
+    let update_monitor_link_info = check_arg!(mut update_monitor_link_info);
+
+    update_monitor_link_info.MonitorLinkInfo = unsafe { zeroed() };
+
+    match gpu.update_monitor_link_info(update_monitor_link_info) {
+        Ok(()) => STATUS::SUCCESS,
+        Err(e) => {
+            error!("failed to create process: {:?}", e);
+            e.0
+        },
+    }.to_u32()
 }
 
 unsafe extern "C" fn power_runtime_set_device_handle(adapter: HANDLE, power_runtime: HANDLE) -> NTSTATUS {
@@ -1854,6 +2103,36 @@ unsafe extern "C" fn set_stable_power_state(adapter: HANDLE, stable_power_state:
 }
 
 unsafe extern "C" fn set_video_protected_region(adapter: HANDLE, set_video_protected_region: *const DXGKARG_SETVIDEOPROTECTEDREGION) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn create_protected_session(adapter: HANDLE, create_protected_session: *mut DXGKARG_CREATEPROTECTEDSESSION) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn destroy_protected_session(adapter: HANDLE, protected_session: HANDLE) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn create_periodic_frame_notification(create_periodic_frame_notification: *mut DXGKARG_CREATEPERIODICFRAMENOTIFICATION) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn destroy_periodic_frame_notification(destroy_periodic_frame_notification: *mut DXGKARG_DESTROYPERIODICFRAMENOTIFICATION) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn set_target_gamma(adapter: HANDLE, set_target_gamma: *const DXGKARG_SETTARGETGAMMA) -> NTSTATUS {
+    error!("{}: not implemented", function!());
+    STATUS::NOT_IMPLEMENTED.to_u32()
+}
+
+unsafe extern "C" fn set_target_content_type(adapter: HANDLE, set_target_content_type: *const DXGKARG_SETTARGETCONTENTTYPE) -> NTSTATUS {
     error!("{}: not implemented", function!());
     STATUS::NOT_IMPLEMENTED.to_u32()
 }

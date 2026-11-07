@@ -44,7 +44,7 @@ use virtio_drivers::{
     device::gpu,
 };
 use zerocopy::*;
-use crossbeam::queue::*;
+use crossbeam_queue::*;
 use spin::mutex::SpinMutex;
 
 pub struct VidPnInterface(D3DKMDT_HVIDPN, *const DXGK_VIDPN_INTERFACE);

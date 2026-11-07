@@ -4,8 +4,15 @@ use core::{
     slice::{
         from_ref,
     },
-    ops::Deref,
+    ops::{
+        Deref,
+        RangeInclusive,
+    },
     ptr::NonNull,
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
+    },
     iter::zip,
     mem::transmute,
     fmt,
@@ -19,6 +26,7 @@ use alloc::{
         Arc,
         Weak,
     },
+    collections::BTreeSet,
 };
 
 use virtio_drivers::device::gpu;
@@ -28,6 +36,7 @@ use microseh;
 use offset_allocator;
 use spin::mutex::SpinMutex;
 use spin::rwlock::RwLock;
+use crossbeam_queue::*;
 
 use wdk::{
     dxgkrnl::*,
@@ -47,6 +56,7 @@ use crate::virgl::*;
 
 const VIRTIO_GPU_DEVICE_TAG: u64 = u64::from_ne_bytes(*b"VGPUDEVI");
 const VIRTIO_GPU_CONTEXT_TAG: u64 = u64::from_ne_bytes(*b"VGPUDCTX");
+const VIRTIO_GPU_HARDWARE_QUEUE_TAG: u64 = u64::from_ne_bytes(*b"VGPUDHWQ");
 
 pub fn allocation_from_res_id(allocations: &[DXGK_ALLOCATIONLIST], res_id: NonZero<u32>) -> Option<&DXGK_ALLOCATIONLIST> {
     for alloc in allocations {
@@ -62,12 +72,12 @@ pub fn allocation_from_res_id(allocations: &[DXGK_ALLOCATIONLIST], res_id: NonZe
 }
 
 #[derive(Debug)]
-struct Context3D {
+struct VirtioContext {
     id: NonZero<u32>,
     capset: CapsetId,
 }
 
-impl Context3D {
+impl VirtioContext {
     fn try_new(chan: GpuChannel, capset: CapsetId, name: &str) -> Result<Self, NtStatus> {
         let id = chan.context_create(capset, name)?;
 
@@ -86,20 +96,22 @@ struct QueryBuffer {
 }
 
 impl QueryBuffer {
+    const N_PAGES: u32 = 1;
+
     pub fn new(device: &Device) -> Result<Self, NtStatus> {
         let alloc_3d = Allocate3d {
             tag: ALLOCATE_3D_TAG,
             target: 0,
             format: VIRGL_FORMAT_R8_UNORM,
             bind: VirglBind::CUSTOM.bits(),
-            width: 4096,
+            width: PAGE_SIZE * Self::N_PAGES,
             height: 1,
             depth: 1,
             array_size: 1,
             last_level: 0,
             nr_samples: 0,
             flags: 0,
-            size: PAGE_SIZE as _,
+            size: (PAGE_SIZE * Self::N_PAGES) as _,
         };
 
         let id = device.chan.resource_create_3d(&alloc_3d)?;
@@ -110,13 +122,13 @@ impl QueryBuffer {
 
         device.chan.context_attach_resource(ctx_id, id)?;
 
-        let mut cmd_data = [0u8; size_of::<gpu::ResourceAttachBacking>() + size_of::<gpu::MemEntry>()];
-        assert_eq!(Command::attach_backing_dma_len(1), size_of_val(&cmd_data));
+        let mut cmd_data = [0u8; size_of::<gpu::ResourceAttachBacking>() + size_of::<gpu::MemEntry>() * Self::N_PAGES as usize];
+        assert_eq!(Command::attach_backing_dma_len(Self::N_PAGES as _), size_of_val(&cmd_data));
 
         let cmd = Command::attach_backing_box(&device.chan, id, &buf, &mut cmd_data);
         device.chan.submit_command_sync(&cmd)?;
 
-        // TODO: this should be stored as owned DeviceSpecific allocation
+        // TODO: this should be stored as owned DeviceSpecific allocation maybe?
 
         Ok(Self {
             id,
@@ -131,18 +143,9 @@ impl QueryBuffer {
 pub struct Device {
     pub tag: u64,
     chan: GpuChannel,
-    main_context: RwLock<Option<Context3D>>,
-    virgl_blit_context: RwLock<Option<Context3D>>,
+    main_context: RwLock<Option<VirtioContext>>,
+    virgl_blit_context: RwLock<Option<VirtioContext>>,
     query_buffer: SpinMutex<Option<QueryBuffer>>,
-}
-
-#[repr(C)]
-#[derive(Tagged, Debug)]
-#[tagged(VIRTIO_GPU_CONTEXT_TAG)]
-pub struct DeviceContext {
-    pub tag: u64,
-    pub device: Arc<Device>,
-    pub engine: Engine,
 }
 
 impl fmt::Debug for Device {
@@ -165,12 +168,8 @@ impl Device {
         })?)
     }
 
-    pub fn dxgk_context(self: &Arc<Self>, engine: Engine) -> Result<Arc<DeviceContext>, NtStatus> {
-        Ok(Arc::try_new(DeviceContext {
-            tag: VIRTIO_GPU_CONTEXT_TAG,
-            device: self.clone(),
-            engine,
-        })?)
+    pub fn create_context(self: &Arc<Self>, engine: Engine, dxgk_context: HANDLE) -> Result<Arc<Context>, NtStatus> {
+        Context::new(self.clone(), engine, dxgk_context)
     }
 
     pub fn dxgk_interface(&self) -> &DxgkInterface {
@@ -187,9 +186,8 @@ impl Device {
             error!("{}: device already has a virtio context initialized: {:?}", function!(), self);
         }
 
-        let context = Context3D::try_new(self.chan.clone(), params.capset_id, params.debug_name())?;
+        let context = VirtioContext::try_new(self.chan.clone(), params.capset_id, params.debug_name())?;
         self.main_context.write().replace(context);
-
 
         if matches!(params.capset_id, CapsetId::Venus | CapsetId::Drm) {
             let capset_id = if supported_capsets.contains(CapsetMask::VIRGL2) {
@@ -201,7 +199,7 @@ impl Device {
             let mut buf = crate::logger::BufferWriter::<64>::default();
             let _ = write!(buf, "shadow-virgl-{}", params.debug_name());
 
-            self.virgl_blit_context.write().replace(Context3D::try_new(self.chan.clone(), capset_id, buf.as_str())?);
+            self.virgl_blit_context.write().replace(VirtioContext::try_new(self.chan.clone(), capset_id, buf.as_str())?);
         }
 
         debug!("{}: debug name {}, main {:?}, blit {:?}", function!(), params.debug_name(), self.main_context, self.virgl_blit_context);
@@ -990,5 +988,256 @@ impl Drop for Device {
                error!("{}: failed to destroy context: {:?}", function!(), e)
             );
         }
+    }
+}
+
+#[repr(C)]
+#[derive(Tagged, Debug)]
+#[tagged(VIRTIO_GPU_CONTEXT_TAG)]
+pub struct Context {
+    pub tag: u64,
+    pub dxgk: HANDLE,
+    pub device: Arc<Device>,
+    pub engine: Engine,
+    //suspend_fence: AtomicU64,
+    // TODO: thingbuf::StaticThingBuf<u64, 16> + KeEvent for wait-for-space
+    suspend_fence: SegQueue<u64>,
+    last_submitted_fence: AtomicU64,
+    last_completed_fence: AtomicU64,
+}
+
+impl Context {
+    fn new(device: Arc<Device>, engine: Engine, dxgk: HANDLE) -> Result<Arc<Context>, NtStatus> {
+        Ok(Arc::try_new(Context {
+            tag: VIRTIO_GPU_CONTEXT_TAG,
+            dxgk,
+            device,
+            engine,
+            //suspend_fence: AtomicU64::new(0),
+            suspend_fence: SegQueue::new(),
+            last_submitted_fence: AtomicU64::new(0),
+            last_completed_fence: AtomicU64::new(0),
+        })?)
+    }
+
+    pub fn last_completed_fence(&self) -> u64 {
+        self.last_completed_fence.load(Ordering::SeqCst)
+    }
+
+    fn complete(&self, value: u64) {
+        self.last_completed_fence.fetch_max(value, Ordering::SeqCst);
+    }
+
+    pub fn last_submitted_fence(&self) -> u64 {
+        self.last_submitted_fence.load(Ordering::SeqCst)
+    }
+
+    pub fn suspend(&self, fence: u64) {
+        //self.suspend_fence.store(fence, Ordering::SeqCst);
+        self.suspend_fence.push(fence);
+    }
+
+    pub fn notify_context_suspended(&self) {
+        //let last_suspend_fence = self.suspend_fence.swap(0, Ordering::SeqCst);
+        //if last_suspend_fence != 0 {
+        //    let _ = self.device.dxgk_interface().notify_interrupt_synchronized(Interrupt::SuspendContextCompleted(self.dxgk, last_suspend_fence));
+        //}
+        loop {
+            let Some(suspend_fence) = self.suspend_fence.pop() else {
+                break;
+            };
+            debug!("{}: {:?}: suspend fence {}", function!(), self.dxgk, suspend_fence);
+            let _ = self.device.dxgk_interface().notify_interrupt_synchronized(Interrupt::SuspendContextCompleted(self.dxgk, suspend_fence));
+        }
+    }
+
+    pub fn create_hw_queue(self: &Arc<Self>, create_hw_queue: &DXGKARG_CREATEHWQUEUE) -> Result<Arc<HwQueue>, NtStatus> {
+        if !matches!(self.engine, Engine::HwSched) {
+            error!("{}: invalid engine for hw queue: {:?}", function!(), self.engine);
+            return Err(NtStatus(STATUS::INVALID_PARAMETER));
+        }
+
+        let Some(fence_cpu_va) = NonNull::new(create_hw_queue.HwQueueProgressFenceCPUVirtualAddress as *mut u8).and_then(NonNull::try_cast_aligned::<u64>) else {
+            error!("{}: invalid progress fence CPU virtual address: {:?}", function!(), create_hw_queue.HwQueueProgressFenceCPUVirtualAddress);
+            return Err(NtStatus(STATUS::INVALID_PARAMETER));
+        };
+
+        let fence = create_hw_queue.hHwQueueProgressFence;
+
+        HwQueue::new(create_hw_queue.hHwQueue, self.clone(), fence, fence_cpu_va)
+    }
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        self.notify_context_suspended();
+    }
+}
+
+// TODO: surely there's a better data structure for "modern" per-queue monitored fences and "legacy" per-engine dxgk fences?
+// The latter will generally have just one or two out-of-order completions (with the exception of escape submit), but the
+// former could have more, I've seen 6 max.
+// Maybe RcuCell<BitSet>? RcuCell::update is essentially what we need.
+// Or RwLock<AtomicBitSet> which will be usually just read and only written on capacity increases (which realistically there be none) or when popping (to update base offsets)?
+#[derive(Debug)]
+pub struct ReorderingQueue {
+    current: AtomicU64,
+    pending: SpinMutex<BTreeSet<u64>>,
+}
+
+impl ReorderingQueue {
+    pub fn new(current: u64) -> Self {
+        Self {
+            current: AtomicU64::new(current.into()),
+            pending: SpinMutex::new(BTreeSet::new()),
+        }
+    }
+
+    pub fn push(&self, value: u64) {
+        let current = self.current.load(Ordering::SeqCst);
+        assert!(value > current);
+
+        //warn!("{}: lock {}", function!(), value);
+        let mut pending = self.pending.lock();
+        //warn!("{}: locked {}", function!(), value);
+        pending.insert(value);
+        drop(pending);
+        //warn!("{}: unlock {}", function!(), value);
+    }
+
+    pub fn pop_range(&self) -> Option<RangeInclusive<u64>> {
+        //warn!("{}: lock", function!());
+        let mut pending = self.pending.lock();
+        //warn!("{}: locked", function!());
+        let initial = self.current.load(Ordering::SeqCst);
+        let mut current = initial;
+        let mut max = None;
+
+        loop {
+            let Some(&next) = pending.first() else {
+                break;
+            };
+            if current + 1 == next {
+                let _ = pending.pop_first();
+                current += 1;
+                max = Some(next);
+            } else if current + 1 > next.into() {
+                drop(pending);
+                panic!("missed: {} (current {})", next, current);
+            } else /* if last completed + 1 < next_fence */ {
+                /* not yet ready */
+                break;
+            }
+        }
+
+        if current != initial {
+            self.current.store(current, Ordering::SeqCst);
+        }
+        drop(pending);
+        //warn!("{}: unlocked", function!());
+
+        max.map(|end| RangeInclusive::new(initial + 1, end))
+    }
+}
+
+#[repr(C)]
+#[derive(Tagged, Debug)]
+#[tagged(VIRTIO_GPU_HARDWARE_QUEUE_TAG)]
+pub struct HwQueue {
+    pub tag: u64,
+    pub dxgk: HANDLE,
+    pub context: Arc<Context>,
+    pub fence: D3DKMT_HANDLE,
+    pub fence_cpu_va: NonNull<u64>,
+    fence_signals: ReorderingQueue,
+}
+
+impl HwQueue {
+    fn new(dxgk: HANDLE, context: Arc<Context>, fence: D3DKMT_HANDLE, fence_cpu_va: NonNull<u64>) -> Result<Arc<Self>, NtStatus> {
+        Ok(Arc::try_new(HwQueue {
+            tag: VIRTIO_GPU_HARDWARE_QUEUE_TAG,
+            dxgk,
+            context,
+            fence,
+            fence_cpu_va,
+            fence_signals: ReorderingQueue::new(0),
+        })?)
+    }
+
+    pub fn submit(&self, value: u64) {
+        let previous_value = self.context.last_submitted_fence.fetch_max(value, Ordering::SeqCst);
+        if value <= previous_value {
+            warn!("{}: duplicate fence submitted: {}", function!(), value);
+        }
+    }
+
+    fn get_fence_cpu_va(&self) -> &AtomicU64 {
+        unsafe { AtomicU64::from_ptr(self.fence_cpu_va.as_ptr()) }
+    }
+
+    pub fn read_progress_fence_value(&self) -> u64 {
+        self.get_fence_cpu_va().load(Ordering::SeqCst)
+    }
+
+    pub fn signal_progress_fence_value(&self, value: u64) -> Result<(), NtStatus> {
+        trace!("{}: {:?}: push {}", function!(), self.context.dxgk, value);
+        self.fence_signals.push(value);
+        self.signal_queued_progress_fences()
+    }
+
+    pub fn signal_queued_progress_fences(&self) -> Result<(), NtStatus> {
+        let (new_completion, last_completed) = if let Some((start, end)) = self.fence_signals.pop_range().map(RangeInclusive::into_inner) {
+            let fence_cpu_va = self.get_fence_cpu_va();
+            let current = fence_cpu_va.load(Ordering::SeqCst);
+            trace!("{}: {:?}: pop {} (current {})", function!(), self.context.dxgk, end, current);
+            if current > end {
+                if current == u64::MAX {
+                    error!("{}: device lost", function!());
+                    self.context.complete(end);
+                    self.context.notify_context_suspended();
+                    return Ok(());
+                } else {
+                    // WTF
+                    panic!("{}: fence rewinding is not supported: {} > {}", function!(), current, end);
+                }
+            }
+
+            fence_cpu_va.store(end, Ordering::SeqCst);
+            let _ = self.context.device.dxgk_interface().notify_interrupt_synchronized(Interrupt::MonitoredFenceSignaled(self.context.engine))?;
+
+            (true, end)
+        } else {
+            trace!("{}: {:?}: queued: {:?}", function!(), self.context.dxgk, self.fence_signals);
+
+            (false, self.context.last_completed_fence())
+        };
+
+        // TODO: maybe "suspend" earlier by holding off signals until resume?
+        let last_submitted = self.context.last_submitted_fence();
+        if last_completed == last_submitted {
+            self.context.notify_context_suspended();
+        }
+
+        if new_completion {
+            self.context.complete(last_completed);
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for HwQueue {
+    fn drop(&mut self) {
+        let fence_signals = self.fence_signals.pending.get_mut();
+        if fence_signals.len() > 0 {
+            warn!("{}: missed some signals: {:?}", function!(), fence_signals);
+        }
+        // TODO: maybe signal now?
+        //if let Some(&val) = fence_signals.last() {
+        //    let fence_cpu_va = self.get_fence_cpu_va();
+        //    fence_cpu_va.store(val, Ordering::SeqCst);
+        //    let _ = self.context.device.dxgk_interface().notify_interrupt_synchronized(Interrupt::MonitoredFenceSignaled(self.context.engine));
+        //    self.context.complete(val);
+        //}
     }
 }

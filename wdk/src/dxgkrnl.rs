@@ -25,6 +25,11 @@ mod sys {
 
 pub use sys::*;
 
+pub const DXGK_FEATURE_SUPPORT_ALWAYS_OFF:   UINT = 0;
+pub const DXGK_FEATURE_SUPPORT_EXPERIMENTAL: UINT = 1;
+pub const DXGK_FEATURE_SUPPORT_STABLE:       UINT = 2;
+pub const DXGK_FEATURE_SUPPORT_ALWAYS_ON:    UINT = 3;
+
 impl DXGK_VIDSCHCAPS {
     #[inline]
     pub fn set_MultiEngineAware(&mut self, val: bool) {
@@ -132,6 +137,11 @@ impl DXGK_CREATECONTEXTFLAGS {
     #[inline]
     pub fn set_VirtualAddressing(&mut self, val: bool) {
         unsafe { self.__bindgen_anon_1.__bindgen_anon_1.set_VirtualAddressing(val as _) };
+    }
+
+    #[inline]
+    pub fn HwQueueSupported(&self) -> bool {
+        unsafe { self.__bindgen_anon_1.__bindgen_anon_1.HwQueueSupported() != 0 }
     }
 
 }
@@ -525,12 +535,17 @@ impl fmt::Debug for DXGK_CREATECONTEXTFLAGS {
     }
 }
 
-//impl DXGK_NODEMETADATA_FLAGS {
-//    #[inline]
-//    pub fn set_ContextSchedulingSupported(&mut self, val: bool) {
-//        unsafe { self.__bindgen_anon_1.__bindgen_anon_1.set_ContextSchedulingSupported(val as _) };
-//    }
-//}
+impl DXGK_NODEMETADATA_FLAGS {
+    #[inline]
+    pub fn set_ContextSchedulingSupported(&mut self, val: bool) {
+        unsafe { self.__bindgen_anon_1.__bindgen_anon_1.set_ContextSchedulingSupported(val as _) };
+    }
+
+    #[inline]
+    pub fn set_RingBufferFenceRelease(&mut self, val: bool) {
+        unsafe { self.__bindgen_anon_1.__bindgen_anon_1.set_RingBufferFenceRelease(val as _) };
+    }
+}
 
 impl fmt::Debug for MEMORY_CACHING_TYPE {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -551,26 +566,40 @@ impl fmt::Debug for MEMORY_CACHING_TYPE {
 impl fmt::Debug for DXGK_QUERYADAPTERINFOTYPE {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_UMDRIVERPRIVATE              => write!(f, "UMDRIVERPRIVATE"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_DRIVERCAPS                   => write!(f, "DRIVERCAPS"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT                 => write!(f, "QUERYSEGMENT"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_RESERVED                     => write!(f, "RESERVED"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT2                => write!(f, "QUERYSEGMENT2"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT3                => write!(f, "QUERYSEGMENT3"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_NUMPOWERCOMPONENTS           => write!(f, "NUMPOWERCOMPONENTS"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_POWERCOMPONENTINFO           => write!(f, "POWERCOMPONENTINFO"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_PREFERREDGPUNODE             => write!(f, "PREFERREDGPUNODE"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_POWERCOMPONENTPSTATEINFO     => write!(f, "POWERCOMPONENTPSTATEINFO"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_HISTORYBUFFERPRECISION       => write!(f, "HISTORYBUFFERPRECISION"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT4                => write!(f, "QUERYSEGMENT4"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_SEGMENTMEMORYSTATE           => write!(f, "SEGMENTMEMORYSTATE"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_GPUMMUCAPS                   => write!(f, "GPUMMUCAPS"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_PAGETABLELEVELDESC           => write!(f, "PAGETABLELEVELDESC"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_PHYSICALADAPTERCAPS          => write!(f, "PHYSICALADAPTERCAPS"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_DISPLAY_DRIVERCAPS_EXTENSION => write!(f, "DISPLAY_DRIVERCAPS_EXTENSION"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_64BITONLYCAPS                => write!(f, "64BITONLYCAPS"),
-            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_PAGINGPROCESSGPUVASIZE       => write!(f, "PAGINGPROCESSGPUVASIZE"),
-            _                                                                   => write!(f, "UNKNOWN({})", self.0),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_UMDRIVERPRIVATE                => write!(f, "UMDRIVERPRIVATE"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_DRIVERCAPS                     => write!(f, "DRIVERCAPS"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT                   => write!(f, "QUERYSEGMENT"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_RESERVED                       => write!(f, "RESERVED"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT2                  => write!(f, "QUERYSEGMENT2"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT3                  => write!(f, "QUERYSEGMENT3"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_NUMPOWERCOMPONENTS             => write!(f, "NUMPOWERCOMPONENTS"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_POWERCOMPONENTINFO             => write!(f, "POWERCOMPONENTINFO"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_PREFERREDGPUNODE               => write!(f, "PREFERREDGPUNODE"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_POWERCOMPONENTPSTATEINFO       => write!(f, "POWERCOMPONENTPSTATEINFO"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_HISTORYBUFFERPRECISION         => write!(f, "HISTORYBUFFERPRECISION"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYSEGMENT4                  => write!(f, "QUERYSEGMENT4"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_SEGMENTMEMORYSTATE             => write!(f, "SEGMENTMEMORYSTATE"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_GPUMMUCAPS                     => write!(f, "GPUMMUCAPS"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_PAGETABLELEVELDESC             => write!(f, "PAGETABLELEVELDESC"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_PHYSICALADAPTERCAPS            => write!(f, "PHYSICALADAPTERCAPS"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_DISPLAY_DRIVERCAPS_EXTENSION   => write!(f, "DISPLAY_DRIVERCAPS_EXTENSION"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_INTEGRATED_DISPLAY_DESCRIPTOR  => write!(f, "INTEGRATED_DISPLAY_DESCRIPTOR"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_UEFIFRAMEBUFFERRANGES          => write!(f, "UEFIFRAMEBUFFERRANGES"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_QUERYCOLORIMETRYOVERRIDES      => write!(f, "QUERYCOLORIMETRYOVERRIDES"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_DISPLAYID_DESCRIPTOR           => write!(f, "DISPLAYID_DESCRIPTOR"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_FRAMEBUFFERSAVESIZE            => write!(f, "FRAMEBUFFERSAVESIZE"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_HARDWARERESERVEDRANGES         => write!(f, "HARDWARERESERVEDRANGES"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_INTEGRATED_DISPLAY_DESCRIPTOR2 => write!(f, "INTEGRATED_DISPLAY_DESCRIPTOR2"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_NODEPERFDATA                   => write!(f, "NODEPERFDATA"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_ADAPTERPERFDATA                => write!(f, "ADAPTERPERFDATA"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_ADAPTERPERFDATA_CAPS           => write!(f, "DXGKQAITYPE_ADAPTERPERFDATA_CAPS"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_GPUVERSION                     => write!(f, "GPUVERSION"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_DEVICE_TYPE_CAPS               => write!(f, "DEVICE_TYPE_CAPS "),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_WDDMDEVICECAPS                 => write!(f, "WDDMDEVICECAPS"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_DEVICE_TYPE_CAPS               => write!(f, "DEVICE_TYPE_CAPS"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_64BITONLYCAPS                  => write!(f, "64BITONLYCAPS"),
+            DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_PAGINGPROCESSGPUVASIZE         => write!(f, "PAGINGPROCESSGPUVASIZE"),
+            _                                                                     => write!(f, "UNKNOWN({})", self.0),
         }
     }
 }
@@ -1217,6 +1246,22 @@ impl fmt::Debug for DXGKARG_CONTROLINTERRUPT2 {
                 .field("InterruptType", &self.InterruptType)
                 .field("InterruptState", &unsafe { self.__bindgen_anon_1.InterruptState })
                 .finish()
+        }
+    }
+}
+
+impl D3DKMDT_WIRE_FORMAT_AND_PREFERENCE {
+    #[inline]
+    pub fn set_Preference(&mut self, val: D3DKMDT_MODE_PREFERENCE) {
+        unsafe {
+            self.__bindgen_anon_1.set_Preference(val);
+        }
+    }
+
+    #[inline]
+    pub fn set_Rgb(&mut self, val: u32) {
+        unsafe {
+            self.__bindgen_anon_1.set_Rgb(val);
         }
     }
 }
