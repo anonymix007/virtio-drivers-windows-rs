@@ -2613,7 +2613,7 @@ impl QueueHandler {
     }
 
     pub fn handle_dpc(&self) {
-        let irq = InterruptStatus::from_bits_truncate(self.data.irq.load(Ordering::SeqCst));
+        let irq = InterruptStatus::from_bits_truncate(self.data.irq.swap(0, Ordering::SeqCst));
 
         if irq.contains(InterruptStatus::QUEUE_INTERRUPT) {
             self.thread.events().control_irq.set();
