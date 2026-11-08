@@ -1819,6 +1819,12 @@ impl GpuChannel {
         self.data.context_id.next().map(NonZero::new).flatten()
     }
 
+    pub fn get_shmem_slice(&self) -> (u64, u64) {
+        let phys = self.data.interface.get_physical_bar_address(self.data.shmem.bar).unwrap() + self.data.shmem.offset;
+        let size = self.data.shmem.length;
+        (phys, size)
+    }
+
     pub fn dxgk_interface(&self) -> &DxgkInterface {
         &self.data.interface
     }
@@ -2505,12 +2511,6 @@ impl QueueHandler {
             cursor: self.cursor.chan.clone(),
             data: self.data.clone(),
         }
-    }
-
-    pub fn get_shmem_slice(&self) -> (u64, u64) {
-        let phys = self.data.interface.get_physical_bar_address(self.data.shmem.bar).unwrap() + self.data.shmem.offset;
-        let size = self.data.shmem.length;
-        (phys, size)
     }
 
     pub fn dxgk_interface(&self) -> &DxgkInterface {

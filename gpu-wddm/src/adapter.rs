@@ -1560,7 +1560,7 @@ impl Adapter {
                         descriptors.fill(zeroed());
                     };
 
-                    let (shmem_start, shmem_len) = state.queue_handler.get_shmem_slice();
+                    let (shmem_start, shmem_len) = state.queue_handler.chan.get_shmem_slice();
 
                     for segment in MemorySegment::SEGMENTS {
                         segment.fill_desc3(shmem_start, shmem_len, &mut descriptors[segment.index() as usize]);
@@ -1624,7 +1624,7 @@ impl Adapter {
                     //let desc_blob_mappable = unsafe { &mut *(segment_info.pSegmentDescriptor.offset((segment_info.SegmentDescriptorStride * (SEGMENT_ID_BLOB_MAPPABLE as u64 - 1)) as isize) as *mut DXGK_SEGMENTDESCRIPTOR4) };
                     //let desc_blob_host3d   = unsafe { &mut *(segment_info.pSegmentDescriptor.offset((segment_info.SegmentDescriptorStride * (SEGMENT_ID_BLOB_HOST3D as u64 - 1)) as isize) as *mut DXGK_SEGMENTDESCRIPTOR4) };
 
-                    let (shmem_start, shmem_len) = state.queue_handler.get_shmem_slice();
+                    let (shmem_start, shmem_len) = state.queue_handler.chan.get_shmem_slice();
 
                     for segment in MemorySegment::SEGMENTS {
                         let desc = unsafe { &mut *(segment_info.pSegmentDescriptor.offset((segment_info.SegmentDescriptorStride * segment.index() as u64) as isize) as *mut DXGK_SEGMENTDESCRIPTOR4) };
@@ -1890,73 +1890,15 @@ impl Adapter {
             ESCAPE_BLOB_MAP_TAG => {
                 trace!("{}: map blob", function!());
                 let blob_map = check_buffer_size!(escape.pPrivateDriverData, escape.PrivateDriverDataSize, BlobMap)?;
-
-                //let chan = state.handler.chan
-
                 let Some(device) = <Device as TaggedExt>::from_arc_handle_clone(escape.hDevice) else {
                     return Err(NtStatus(STATUS::INVALID_PARAMETER));
                 };
 
                 let alloc = state.queue_handler.dxgk_interface().allocation_from_handle(blob_map.handle).ok_or(STATUS::INVALID_HANDLE)?;
                 if { blob_map.flags }.contains(BlobMapFlags::UNMAP) {
-                    if let Some(ptr) = unsafe { blob_map.ptr.ptr } && let Some((offset, size)) = alloc.mapped_range() {
-                        let phys = state.queue_handler.get_shmem_slice().0 + offset;
-                        let mdl = MdlOwned::from_io_physical_range(phys, size)?;
-                        //debug!("{}: Unmapped {:X} (offset {:X}) from address {:?}: {:?}", function!(), { blob_map.handle }, offset, ptr, alloc);
-                        mm_unmap_locked_pages(&mdl, ptr);
-                    }
-
-                    //let err = if let Some(ptr) = unsafe { blob_map.ptr.ptr } {
-                    //    //let
-                    //
-                    //    state.queue_handler.dxgk_interface().unmap_memory(ptr)
-                    //} else {
-                    //    Ok(())
-                    //};
-                    alloc.unmap_blob(&device)?;
+                    alloc.unmap_blob(&state.queue_handler.chan)?;
                 } else {
-                    let (offset, size, map_info) = alloc.map_blob(&device)?;
-
-                    let phys = state.queue_handler.get_shmem_slice().0 + offset;
-
-                    let caching_type = match map_info {
-                        gpu::VIRTIO_GPU_MAP_CACHE_NONE => {
-                            warn!("{}: map blob returned unexpected caching type VIRTIO_GPU_MAP_CACHE_NONE for {:?}", function!(), &alloc);
-                            MEMORY_CACHING_TYPE::MmNonCached
-                        },
-                        gpu::VIRTIO_GPU_MAP_CACHE_CACHED => MEMORY_CACHING_TYPE::MmCached,
-                        gpu::VIRTIO_GPU_MAP_CACHE_UNCACHED => MEMORY_CACHING_TYPE::MmNonCached,
-                        gpu::VIRTIO_GPU_MAP_CACHE_WC => MEMORY_CACHING_TYPE::MmWriteCombined,
-                        _ => {
-                            error!("{}: map blob returned unkown caching type 0x{:x} for {:?}", function!(), map_info, &alloc);
-                            return Err(NtStatus(STATUS::IO_DEVICE_ERROR));
-                        },
-                    };
-
-
-                    if size >= u32::MAX as _ {
-                        error!("{}: mapping too big blobs of size {:?} is not implemented yet", function!(), size);
-                        return Err(NtStatus(STATUS::NOT_IMPLEMENTED));
-                    };
-
-                    let mdl = MdlOwned::from_io_physical_range(phys, size)?;
-
-                    let ptr = match microseh::try_seh(|| -> Option<NonNull<u8>> {
-                        mm_map_locked_pages_specify_cache(&mdl, true, wdk::wdm::MEMORY_CACHING_TYPE(caching_type.0), None)
-                    }) {
-                        Ok(Some(ptr)) => ptr,
-                        Ok(None) => {
-                            error!("{}: Failed to map {:X} (offset {:X}) with caching type {:?}: {:?}", function!(), { blob_map.handle }, offset, caching_type, alloc);
-                            return Err(NtStatus(STATUS::UNSUCCESSFUL));
-                        }
-                        Err(e) => {
-                            error!("{}: Exception {:?} while trying to map {:X} (offset {:X}) with caching type {:?}: {:?}", function!(), e, { blob_map.handle }, offset, caching_type, alloc);
-                            return Err(e.into());
-                        },
-                    };
-
-                    //let ptr = state.queue_handler.dxgk_interface().map_memory(phys, size, false, true, caching_type)?;
-                    debug!("{}: Mapped {:X} (offset {:X}) at address {:?} with caching type {:?}: {:?}", function!(), { blob_map.handle }, offset, ptr, caching_type, alloc);
+                    let ptr = alloc.map_blob(&device)?;
                     blob_map.ptr.ptr = Some(ptr);
                 }
 
@@ -2771,24 +2713,7 @@ impl Adapter {
 
         if alloc.is_mapped() {
             debug!("{}: unmapping blob: {:?}", function!(), alloc);
-            let offset = match alloc.resource() {
-               VirtioResource::_3D {..} => {
-                   unreachable!()
-               },
-               VirtioResource::Blob {map, ..} => {
-                   map.read().unwrap()
-               },
-            };
-
-            /*if let Some((offset, size)) = alloc.mapped_range() {
-                let (shmem_start, _) = chan.get_shmem_slice();
-                let phys =  shmem_start + offset;
-                let mdl = MdlOwned::from_physical_range(phys, size)?;
-                //debug!("{}: Unmapped {:X} (offset {:X}) from address {:?}: {:?}", function!(), { blob_map.handle }, offset, ptr, alloc);
-                mm_unmap_locked_pages(&mdl, ptr);
-            }*/
-
-            let _ = chan.resource_unmap_blob(id, offset).inspect_err(|e|
+            let _ = alloc.unmap_blob(chan).inspect_err(|e|
                 error!("failed to unmap blob resource {}: {:?}", id, e)
             );
         }

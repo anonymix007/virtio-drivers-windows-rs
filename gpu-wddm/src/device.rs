@@ -948,8 +948,8 @@ impl Device {
         self.chan.resource_map_blob(ctx_id, res_id, size)
     }
 
-    pub fn context_unmap_blob(&self, res_id: NonZero<u32>, offset: offset_allocator::Allocation) -> Result<(), NtStatus> {
-        self.chan.resource_unmap_blob(res_id, offset)
+    pub fn get_shmem_slice(&self) -> (u64, u64) {
+        self.chan.get_shmem_slice()
     }
 }
 

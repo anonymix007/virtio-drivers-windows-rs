@@ -39,22 +39,32 @@ use wdk::{
         EventType,
         KeEvent,
         NtTime,
+        MdlOwned,
         ke_delay_execution_thread,
+        mm_map_locked_pages_specify_cache,
+        mm_unmap_locked_pages,
     },
     dxgkrnl::{
         D3DDDIFORMAT,
         D3DKMT_HANDLE,
         DXGK_PTE,
+        MEMORY_CACHING_TYPE,
     },
 };
 
-use virtio_drivers::device::gpu::MemEntry;
+use virtio_drivers::device::{
+    gpu::MemEntry,
+    gpu,
+};
 
 use crate::adapter::*;
 use crate::device::*;
 use crate::uapi::*;
 use crate::virgl::*;
-use crate::queue::AlignedBox;
+use crate::queue::{
+    AlignedBox,
+    GpuChannel,
+};
 use crate::function;
 
 const VIRTIO_GPU_ALLOCATION_TAG: u64 = u64::from_ne_bytes(*b"VGPUALLO");
@@ -237,7 +247,7 @@ pub enum VirtioResource {
         mem: BlobMem,
         flags: BlobFlag,
         layout: RwLock<Option<BlobLayout>>,
-        map: RwLock<Option<offset_allocator::Allocation>>,
+        map: RwLock<Option<(offset_allocator::Allocation, MdlOwned, NonNull<u8>)>>,
         size: u64,
     },
 }
@@ -289,13 +299,12 @@ impl Clone for VirtioResource {
                 size,
             } => {
                 let layout_val = *layout.read();
-                let map_val = *map.read();
                 VirtioResource::Blob {
                     id: *id,
                     mem: *mem,
                     flags: *flags,
                     layout: RwLock::new(layout_val),
-                    map: RwLock::new(map_val),
+                    map: RwLock::new(None),
                     size: *size,
                 }
             }
@@ -609,7 +618,7 @@ impl Allocation {
             //fence,
             flags: AtomicU32::new(flags),
             resource,
-            busy: (Arc::pin_init(KeEvent::new(EventType::Notification, false))?, AtomicUsize::new(0)),
+            busy: (Arc::try_pin_init(KeEvent::new(EventType::Notification, false))?, AtomicUsize::new(0)),
             //sync: SpinMutex::new(Vec::new()),
             sync: RwLock::new(Vec::new()),
             //device_specific: SpinMutex::new(Vec::new()),
@@ -683,8 +692,6 @@ impl Allocation {
     }
 
     pub fn mark_busy(&self) {
-        let busy_count = self.busy.1.load(Ordering::SeqCst);
-
         self.busy.1.fetch_add(1, Ordering::SeqCst);
         self.busy.0.clear();
 
@@ -696,9 +703,9 @@ impl Allocation {
     }
 
     pub fn mark_free(&self) {
-        let busy_count = self.busy.1.load(Ordering::SeqCst);
-
-        if self.busy.1.fetch_sub(1, Ordering::SeqCst) == 1 {
+        let busy_count = self.busy.1.fetch_sub(1, Ordering::SeqCst);
+        assert!(busy_count > 0);
+        if busy_count == 1 {
             self.busy.0.set();
             let mut sync_files = self.sync.write();
             for sync in sync_files.deref() {
@@ -725,7 +732,7 @@ impl Allocation {
                 None
             },
             VirtioResource::Blob { size, map, ..} => {
-                if let Some(map) = *map.read() {
+                if let Some((map, mdl, ptr)) = map.read().as_ref() {
                     Some((map.offset as u64 * wdk::wdm::PAGE_SIZE as u64, *size))
                 } else {
                     None
@@ -734,7 +741,7 @@ impl Allocation {
         }
     }
 
-    pub fn map_blob(&self, device: &Device) -> Result<(u64, u64, u32), NtStatus> {
+    pub fn map_blob(&self, device: &Device) -> Result<NonNull<u8>, NtStatus> {
         let is_mapped = self.is_mapped();
 
         match &self.resource {
@@ -749,11 +756,58 @@ impl Allocation {
                         error!("{}: cannot map blob multiple times: {:?}", function!(), self);
                         Err(NtStatus(STATUS::ALREADY_COMMITTED))
                     } else {
-                        let (offset_alloc, bar_offset, map_info) = device.context_map_blob(self.id, *size)?;
                         // Fuck borrow checker, this is stupid
                         Self::set_flag_mapped(&self.flags, true);
-                        map.write().replace(offset_alloc);
-                        Ok((bar_offset, *size, map_info))
+
+                        let (offset_alloc, bar_offset, map_info) = device.context_map_blob(self.id, *size)?;
+                        let phys = device.get_shmem_slice().0 + bar_offset;
+
+                        let caching_type = match map_info {
+                            gpu::VIRTIO_GPU_MAP_CACHE_NONE => {
+                                warn!("{}: map blob returned unexpected caching type VIRTIO_GPU_MAP_CACHE_NONE for {:?}", function!(), self);
+                                MEMORY_CACHING_TYPE::MmNonCached
+                            },
+                            gpu::VIRTIO_GPU_MAP_CACHE_CACHED => MEMORY_CACHING_TYPE::MmCached,
+                            gpu::VIRTIO_GPU_MAP_CACHE_UNCACHED => MEMORY_CACHING_TYPE::MmNonCached,
+                            gpu::VIRTIO_GPU_MAP_CACHE_WC => MEMORY_CACHING_TYPE::MmWriteCombined,
+                            _ => {
+                                error!("{}: map blob returned unknown caching type 0x{:x} for {:?}", function!(), map_info, self);
+                                return Err(NtStatus(STATUS::IO_DEVICE_ERROR));
+                            },
+                        };
+
+                        if *size >= u32::MAX as _ {
+                            error!("{}: mapping too big blobs of size {:?} is not implemented yet", function!(), size);
+                            return Err(NtStatus(STATUS::NOT_IMPLEMENTED));
+                        };
+
+                        let mdl = MdlOwned::from_io_physical_range(phys, *size)?;
+
+                        let ptr = match microseh::try_seh(|| -> Option<NonNull<u8>> {
+                            if let Some(ptr) = mm_map_locked_pages_specify_cache(&mdl, true, wdk::wdm::MEMORY_CACHING_TYPE(caching_type.0), None) {
+                                //unsafe {
+                                //    core::ptr::write_bytes(ptr.as_ptr(), 0, *size as _);
+                                //}
+                                Some(ptr)
+                            } else {
+                                None
+                            }
+                        }) {
+                            Ok(Some(ptr)) => ptr,
+                            Ok(None) => {
+                                error!("{}: Failed to map (offset {:X}) with caching type {:?}: {:?}", function!(), bar_offset, caching_type, self);
+                                return Err(NtStatus(STATUS::UNSUCCESSFUL));
+                            }
+                            Err(e) => {
+                                error!("{}: Exception {:?} while trying to map (offset {:X}) with caching type {:?}: {:?}", function!(), e, bar_offset, caching_type, self);
+                                return Err(e.into());
+                            },
+                        };
+
+                        map.write().replace((offset_alloc, mdl, ptr));
+
+                        debug!("{}: Mapped alloc (offset {:X}) at address {:?} with caching type {:?}: {:?}", function!(), bar_offset, ptr, caching_type, self);
+                        Ok(ptr)
                     }
                 } else {
                     error!("{}: cannot map unmappable blob: {:?}", function!(), self);
@@ -763,10 +817,10 @@ impl Allocation {
         }
     }
 
-    pub fn unmap_blob(&self, device: &Device) -> Result<(), NtStatus> {
+    pub fn unmap_blob(&self, chan: &GpuChannel) -> Result<(), NtStatus> {
         if self.is_mapped() {
             self.set_mapped(false);
-            let offset_alloc = match &self.resource {
+            let (offset_alloc, mdl, ptr) = match &self.resource {
                 VirtioResource::_3D {..} => {
                     unreachable!();
                 },
@@ -774,7 +828,10 @@ impl Allocation {
                     map.write().take().unwrap()
                 },
             };
-            device.context_unmap_blob(self.id, offset_alloc)
+
+            mm_unmap_locked_pages(&mdl, ptr);
+
+            chan.resource_unmap_blob(self.id, offset_alloc)
         } else {
             warn!("{}: cannot unmap not mapped resource: {:?}", function!(), self);
             Err(NtStatus(STATUS::INVALID_PARAMETER))
@@ -1074,41 +1131,10 @@ impl Allocation {
                             map.1.push(entry);
                         }
                     }
+                    debug!("{}: ready: {}, pages: {:?}", function!(), attached_size >= *size, pages);
+                    debug!("{}: ({} / {}): {:?}", function!(), map.0, offset, map.1);
+                    map.0 = offset;
                 }
-
-                /*
-
-                if offset < map.0 {
-                    error!("{}: out of order attach: attached pages start from offset {}, new offset {}", function!(), offset, map.0);
-                    return false;
-                } else {
-                    for page in pages {
-                        let length = page.Len() as u32;
-                        assert!(length > 0, "unexpected page size: {}", length);
-                        assert!(page.Flags().Segment() == 0, "only system memory backing for 3d resources is supported, not {}", page.Flags().Segment());
-                        let addr = page.PageAddress() * wdk::wdm::PAGE_SIZE as u64;
-
-                        attached_size += length as u64;
-
-                        let entry = MemEntry {
-                            addr,
-                            length,
-                            padding: 0,
-                        };
-
-                        if let Some(previous) = map.1.last_mut() && let Some(new_length) = merge_entries(previous, &entry) {
-                            // Physically contiguous pages, reuse last entry
-                            previous.length = new_length;
-                        } else {
-                            map.1.push(entry);
-                        }
-                    }
-                }
-                */
-
-                debug!("{}: ready: {}, pages: {:?}", function!(), attached_size >= *size, pages);
-                debug!("{}: ({} / {}): {:?}", function!(), map.0, offset, map.1);
-                map.0 = offset;
 
                 attached_size >= *size
             },
