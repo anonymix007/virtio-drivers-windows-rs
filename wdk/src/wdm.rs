@@ -23,6 +23,8 @@ use core::{
         Add,
         BitOr,
         BitOrAssign,
+        Deref,
+        DerefMut,
     },
     cmp::{
         max,
@@ -159,6 +161,17 @@ unsafe impl GlobalAlloc for WdkAllocator {
     }
 }
 
+pub fn rtl_capture_stack_trace(skip: ULONG, frames: &mut [PVOID]) -> &[PVOID] {
+    #[link(name = "ntoskrnl")]
+    unsafe extern "C" {
+        fn RtlCaptureStackBackTrace(FramesToSkip: ULONG, FramesToCapture: ULONG, BackTrace: *mut PVOID, BackTraceHash: *mut ULONG) -> USHORT;
+    }
+    let len = unsafe {
+        RtlCaptureStackBackTrace(skip, frames.len() as _, frames.as_mut_ptr(), core::ptr::null_mut()) as usize
+    };
+    &frames[..len]
+}
+
 pub struct NtTime(Option<i64>);
 
 impl NtTime {
@@ -240,7 +253,7 @@ const _: () = assert!(core::mem::size_of::<KeEvent>() == core::mem::size_of::<KE
 unsafe impl Sync for KeEvent {}
 
 impl KeEvent {
-    pub fn new(event_type: EventType, signalled: bool) -> impl PinInit<Self> {
+    pub fn new(event_type: EventType, signalled: bool) -> impl PinInit<Self, core::alloc::AllocError> {
         unsafe {
             pin_init_from_closure(move |slot: *mut Self| {
                 KeInitializeEvent((*slot).event.get(), event_type.into(), signalled as _);
@@ -594,16 +607,15 @@ macro_rules! select {
     }};
 }
 
-/*pub struct IrqlGuard {
+pub struct IrqlGuard {
     old_irql: KIRQL,
 }
 
 impl IrqlGuard {
-    pub fn raise() -> Option<Self> {
-        //let old_irql = unsafe { KfRaiseIrql(HIGH_LEVEL as _) };
+    pub fn raise(level: u32) -> Option<Self> {
         let old_irql = unsafe { KeGetCurrentIrql() };
-        if old_irql <= DISPATCH_LEVEL as _ {
-            let old_irql = unsafe { KfRaiseIrql(DISPATCH_LEVEL as _) };
+        if old_irql <= level as _ {
+            let old_irql = unsafe { KfRaiseIrql(level as _) };
             Some(IrqlGuard { old_irql })
         } else {
             None
@@ -615,7 +627,101 @@ impl Drop for IrqlGuard {
     fn drop(&mut self) {
         unsafe { KeLowerIrql(self.old_irql) };
     }
-}*/
+}
+
+#[pin_data]
+pub struct FastMutex<T> {
+    #[pin]
+    lock: UnsafeCell<FAST_MUTEX>,
+    data: UnsafeCell<T>,
+    #[pin]
+    pin: PhantomPinned,
+}
+
+unsafe impl<T: Send> Sync for FastMutex<T> {}
+unsafe impl<T: Send> Send for FastMutex<T> {}
+
+impl<T> FastMutex<T> {
+    pub fn new(data: T) -> impl PinInit<Self> {
+        let init_lock = unsafe {
+            pin_init_from_closure(move |slot: *mut UnsafeCell<FAST_MUTEX>| {
+                let raw = UnsafeCell::raw_get(slot);
+                *raw = core::mem::zeroed();
+                (*raw).Count = FM_LOCK_BIT as _;
+                (*raw).Owner = core::ptr::null_mut();
+                (*raw).Contention = 0;
+                KeInitializeEvent(&raw mut (*raw).Event, EVENT_TYPE::SynchronizationEvent, false as _);
+                Ok(())
+            })
+        };
+
+        pin_init!(Self {
+            lock <- init_lock,
+            data: UnsafeCell::new(data),
+            pin: PhantomPinned,
+        })
+    }
+}
+
+/*
+pub struct SpinMutex<T> {
+    lock: UnsafeCell<KSPIN_LOCK>,
+    data: UnsafeCell<T>,
+}
+
+unsafe impl<T: Send> Sync for SpinMutex<T> {}
+unsafe impl<T: Send> Send for SpinMutex<T> {}
+
+pub struct SpinMutexGuard<'a, T> {
+    mutex: &'a SpinMutex<T>,
+    handle: KLOCK_QUEUE_HANDLE,
+}
+
+impl<T> SpinMutex<T> {
+    pub fn new(data: T) -> impl PinInit<Self> {
+        unsafe {
+            pin_init_from_closure(move |slot: *mut Self| {
+                KeInitializeSpinLock((*slot).lock.get());
+                Ok(())
+            })
+        }
+    }
+
+    pub fn lock(&self) -> SpinMutexGuard<'_, T> {
+        unsafe {
+            let mut handle: KLOCK_QUEUE_HANDLE = core::mem::zeroed();
+            KeAcquireInStackQueuedSpinLock(self.lock.get(), &mut handle);
+            SpinMutexGuard { mutex: self, handle }
+        }
+    }
+}
+
+impl<T> Deref for SpinMutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        unsafe {
+            &*self.mutex.data.get()
+        }
+    }
+}
+
+impl<T> DerefMut for SpinMutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        unsafe {
+            &mut *self.mutex.data.get()
+        }
+    }
+}
+
+impl<T> Drop for SpinMutexGuard<'_, T> {
+    fn drop(&mut self) {
+        unsafe {
+            KeReleaseInStackQueuedSpinLock(&mut self.handle);
+        }
+    }
+}
+*/
 
 pub fn io_get_remaining_stack_size() -> usize {
     let mut top = 0u64;
@@ -696,6 +802,7 @@ impl MdlRef {
 }
 
 
+#[derive(Debug)]
 #[repr(transparent)]
 pub struct MdlOwned(pub *mut MDL);
 

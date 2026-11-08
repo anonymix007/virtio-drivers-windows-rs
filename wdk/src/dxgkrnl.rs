@@ -545,6 +545,11 @@ impl DXGK_NODEMETADATA_FLAGS {
     pub fn set_RingBufferFenceRelease(&mut self, val: bool) {
         unsafe { self.__bindgen_anon_1.__bindgen_anon_1.set_RingBufferFenceRelease(val as _) };
     }
+
+    #[inline]
+    pub fn set_MaxInFlightHwQueueBuffers(&mut self, val: u16) {
+        unsafe { self.__bindgen_anon_1.__bindgen_anon_1.set_MaxInFlightHwQueueBuffers(val as _) };
+    }
 }
 
 impl fmt::Debug for MEMORY_CACHING_TYPE {

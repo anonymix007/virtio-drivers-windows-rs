@@ -44,13 +44,13 @@ use alloc::{
     collections::TryReserveError,
 };
 
-use winresult::{STATUS};
+use winresult::STATUS;
+use ::spin::rwlock;
 use ida_rs::*;
 use bitflags::*;
 use pin_init::*;
 use zerocopy::*;
 use smallvec::*;
-use spin::RwLock;
 use hashbrown::*;
 
 use tagged::*;
@@ -62,6 +62,7 @@ use wdk::{
         mm_map_locked_pages_specify_cache,
         mm_unmap_locked_pages,
     },
+    spin::RwLock,
     *,
 };
 use virtio_drivers::{
@@ -488,9 +489,9 @@ impl DxgkInterface {
         Ok(bytes_read)
     }
 
-    fn write_device_space(&self, whichspace: u32, offset: u32, data: &mut [u8]) -> Result<u32, NtStatus> {
+    fn write_device_space(&self, whichspace: u32, offset: u32, data: &[u8]) -> Result<u32, NtStatus> {
         let mut bytes_written: u32 = 0;
-        dxgk_call_status!(<= PASSIVE_LEVEL | self.DxgkCbWriteDeviceSpace(whichspace, data.as_mut_ptr() as _, offset, data.len() as _, &mut bytes_written))?;
+        dxgk_call_status!(<= PASSIVE_LEVEL | self.DxgkCbWriteDeviceSpace(whichspace, data.as_ptr() as _, offset, data.len() as _, &mut bytes_written))?;
         Ok(bytes_written)
     }
 
@@ -985,7 +986,7 @@ struct AdapterState {
     is_vga: bool,
     is_msi: bool,
     supported_capsets: CapsetMask,
-    capset_info: [(CapsetInfo, RwLock<Option<Box<[u8]>>>); 64],
+    capset_info: [(CapsetInfo, rwlock::RwLock<Option<Box<[u8]>>>); 64],
 
     max_simultaneously_running_commands: [AtomicU32; Engine::TOTAL_COUNT as usize],
 
@@ -1366,7 +1367,7 @@ impl Adapter {
             is_msi,
             negotiated_features,
             supported_capsets: CapsetMask::default(),
-            capset_info <- init_array_from_fn(|_| (CapsetInfo::default(), RwLock::new(None))),
+            capset_info <- init_array_from_fn(|_| (CapsetInfo::default(), rwlock::RwLock::new(None))),
             queue_handler <- QueueHandler::new(pci_transport, pci_root.configuration_access, *negotiated_features, shmem),
             max_simultaneously_running_commands <- init_array_from_fn(|_| AtomicU32::new(0)),
             system_display_info: None,
@@ -1382,7 +1383,7 @@ impl Adapter {
         let (supported_capsets, capset_info) = chan.get_capset_infos(num_capsets)?;
 
         state.supported_capsets = supported_capsets;
-        state.capset_info = capset_info.map(|i| (i, RwLock::new(None)));
+        state.capset_info = capset_info.map(|i| (i, rwlock::RwLock::new(None)));
 
         let display_modes = chan.get_display_info()?;
 

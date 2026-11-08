@@ -30,8 +30,6 @@ use alloc::{
 use pin_init::*;
 use winresult::STATUS;
 
-use spin::rwlock::RwLock;
-
 use crate::adapter::*;
 use crate::device::*;
 use crate::uapi::*;
@@ -39,12 +37,15 @@ use crate::function;
 
 use modular_bitfield::prelude::*;
 
-use wdk::dxgkrnl::{
-    HANDLE,
-    DXGK_PAGE_TABLE_LEVEL_DESC,
-    DXGK_SEGMENTFLAGS,
-    DXGK_SEGMENTDESCRIPTOR3,
-    DXGK_SEGMENTDESCRIPTOR4,
+use wdk::{
+    dxgkrnl::{
+        HANDLE,
+        DXGK_PAGE_TABLE_LEVEL_DESC,
+        DXGK_SEGMENTFLAGS,
+        DXGK_SEGMENTDESCRIPTOR3,
+        DXGK_SEGMENTDESCRIPTOR4,
+    },
+    spin::RwLock,
 };
 
 const VIRTIO_GPU_PROCESS_TAG: u64 = u64::from_ne_bytes(*b"VGPUPROC");

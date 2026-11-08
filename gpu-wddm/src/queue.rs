@@ -78,10 +78,6 @@ use virtio_drivers::{
     Hal,
     PhysAddr,
 };
-use spin::{
-    mutex::SpinMutex,
-    rwlock::RwLock,
-};
 
 use crate::adapter::*;
 use crate::uapi::*;
@@ -103,10 +99,16 @@ use wdk::{
         NTSTATUS,
         io_get_remaining_stack_size,
         ke_query_performance_counter,
+        IrqlGuard,
+        DISPATCH_LEVEL,
     },
     select,
     wdm_call_status,
     dxgkrnl::DXGKRNL_INTERFACE,
+    spin::{
+        RwLock,
+        SpinMutex,
+    },
     //ke_delay_execution_thread,
 };
 
@@ -762,12 +764,14 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
 
         let init_free = unsafe {
             init_from_closure(move |slot: *mut ArrayQueue<usize>| {
-                slot.write_volatile(ArrayQueue::new(SIZE));
+                let free = ArrayQueue::new(SIZE);
+                for i in 0..SIZE {
+                    free.push(i).unwrap();
+                }
+                slot.write(free);
                 Ok::<_, Infallible>(())
             })
-        }.chain(|free| Ok(for i in 0..SIZE {
-            free.push(i).unwrap();
-        }));
+        };
 
         let init_queue = VirtQueue::<DxgkInterface, SIZE>::init(
             pci_transport,
@@ -1034,30 +1038,7 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
             return Ok(None);
         };
 
-        //trace!("response: device wrote {} bytes into buffer {}", len, i);
-
         let callback = take(&mut self.buffers.callbacks[i]);
-
-        /*
-        if let Some((Engine::Other(_), fence)) = callback.as_dma_completed() {
-            let input = self.buffers.inputs[i].as_ref().unwrap().as_ref();
-            let hdr = gpu::CtrlHeader::read_from_prefix(input).unwrap().0;
-            info!("{}: {:?}: dxgk_fence {} (completed)", function!(), hdr.hdr_type, fence);
-        } else if let Callback::None = callback {
-            let input = self.buffers.inputs[i].as_ref().unwrap().as_ref();
-            let hdr = gpu::CtrlHeader::read_from_prefix(input).unwrap().0;
-            if hdr.hdr_type == gpu::Command::SUBMIT_3D {
-                let body = &input[size_of::<gpu::CmdSubmit3D>()..];
-
-                let offset = 0;
-                let typed_data = unsafe {
-                    core::slice::from_raw_parts(body.as_ptr() as *const u32, body.len() / size_of::<u32>())
-                };
-                let cmd = crate::virgl::VenusCommandType(typed_data[0]);
-                info!("{}: SUBMIT_3D: (completed) flags {}, virtio_fence {}, ctx {}, ring {}, cmd {:?}, body {:X?}", function!(), hdr.flags, hdr.fence_id, hdr.ctx_id, hdr.ring_idx, cmd, typed_data);
-            }
-        }
-        */
 
         self.check_response(i);
 
@@ -1142,11 +1123,16 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         Ok(Some(()))
     }
 
-    pub fn handle_responses(&mut self, chan: &GpuChannel) {
+    pub fn handle_responses(&mut self, chan: &GpuChannel) -> bool {
+        let mut handled_something = false;
+
         loop {
             match self.response(chan) {
-                Ok(None) => return,
-                Ok(Some(())) => continue,
+                Ok(None) => return handled_something,
+                Ok(Some(())) => {
+                    handled_something = true;
+                    continue
+                },
                 Err(e) => {
                     error!("{}: failed to handle response: {:?}", function!(), e);
                     continue
@@ -1154,152 +1140,7 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
             };
         }
     }
-
-    /*pub fn handle_nop(&mut self, notify_dma: &dyn Fn(u32) -> Result<(), NtStatus>) {
-        loop {
-            let Some(fence) = self.nop.pop() else {
-                return;
-            };
-            match notify_dma(fence) {
-                Ok(()) => continue,
-                Err(e) => {
-                    error!("{}: failed to handle nop: {:?}", function!(), e);
-                    continue
-                },
-            }
-        }
-    }*/
-
-    //fn push_to_handler(&self, input: MaybeInlineBuffer<IN>, output: MaybeInlineBuffer<OUT>, callback: Callback<OUT>) -> Result<(), NtStatus> {
-    //    self.chan.push(Buffer { input, output, callback });
-    //
-    //    Ok(())
-    //}
-    //
-    //fn pop_in_handler(&self) -> Option<Buffer<IN, OUT>> {
-    //    self.chan.pop()
-    //}
-
-    /*
-
-    pub fn request_async_buf(&self, input: MaybeInlineBuffer<IN>, output: MaybeInlineBuffer<OUT>, callback: Callback<OUT>) -> Result<(), NtStatus> {
-        //trace!("{}", function!());
-        self.chan.push(Buffer { input, output, callback });
-        Ok(())
-    }
-
-    pub fn request_async_into_buf<Req: IntoBytes + Immutable + KnownLayout>(&self, req: Req, output: MaybeInlineBuffer<OUT>, callback: Callback<OUT>) -> Result<(), NtStatus> {
-        //trace!("{}", function!());
-
-        let input = MaybeInlineBuffer::try_from_value(req)?;
-        self.request_async_buf(input, output, callback)
-    }
-
-    pub fn request_async<Req: IntoBytes + Immutable + KnownLayout, Rsp: FromBytes + IntoBytes + KnownLayout>(&self, req: Req, callback: Callback<OUT>) -> Result<(), NtStatus> {
-        //trace!("{}", function!());
-
-        let output = MaybeInlineBuffer::try_new_zeroed::<Rsp>()?;
-        self.request_async_into_buf(req, output, callback)
-    }
-
-    pub fn request_blocking_buf(&self, input: MaybeInlineBuffer<IN>, output: MaybeInlineBuffer<OUT>) -> Result<MaybeInlineBuffer<OUT>, NtStatus> {
-        let signal = CancellationSignal::new();
-        let mut response = pin!(MaybeUninit::<MaybeInlineBuffer<OUT>>::uninit());
-        stack_pin_init!(let block = KeEvent::new(EventType::Notification, false));
-        let callback = unsafe {
-            Callback::SetEvent(
-                NonNull::new_unchecked(block.as_mut().get_unchecked_mut()),
-                Some(NonNull::new_unchecked(response.as_mut().get_unchecked_mut())),
-                signal.clone()
-            )
-        };
-
-        self.request_async_buf(input, output, callback)?;
-
-        block.wait(NtTime::relative_ms(1_000)).inspect_err(|e| {
-            signal.cancel();
-            error!("failed to wait for request: {:?}", e)
-        })?;
-
-        let buffer = replace(response.as_mut().get_mut(), MaybeUninit::uninit());
-        /* Response should be initialized by this point */
-        let output = unsafe { buffer.assume_init() };
-
-        Ok(output)
-    }
-
-    pub fn request_blocking_into_buf<Req: IntoBytes + Immutable + KnownLayout>(&self, req: Req, output: MaybeInlineBuffer<OUT>) -> Result<MaybeInlineBuffer<OUT>, NtStatus> {
-        //trace!("{}", function!());
-
-        let input = MaybeInlineBuffer::try_from_value(req)?;
-        self.request_blocking_buf(input, output)
-
-        /*let signal = CancellationSignal::new();
-        let mut response = pin!(MaybeUninit::<MaybeInlineBuffer<OUT>>::uninit());
-        stack_pin_init!(let block = KeEvent::new(EventType::Notification, false));
-        let callback = unsafe {
-            Callback::SetEvent(
-                NonNull::new_unchecked(block.as_mut().get_unchecked_mut()),
-                Some(NonNull::new_unchecked(response.as_mut().get_unchecked_mut())),
-                signal.clone()
-            )
-        };
-
-        self.request_async_into_buf(handler_event, req, output, callback)?;
-
-        block.wait(NtTime::relative_ms(1_000)).inspect_err(|e| {
-            signal.cancel();
-            error!("failed to wait for request {}: {:?}", core::any::type_name::<Req>(), e)
-        })?;
-
-        let buffer = core::mem::replace(response.as_mut().get_mut(), MaybeUninit::uninit());
-        /* Response should be initialized by this point */
-        let output = unsafe { buffer.assume_init() };
-
-        Ok(output)*/
-    }
-
-    pub fn request_blocking<Req: IntoBytes + Immutable + KnownLayout, Rsp: FromBytes + IntoBytes + KnownLayout>(&self, req: Req) -> Result<Rsp, NtStatus> {
-        //trace!("{}", function!());
-
-        let output = MaybeInlineBuffer::try_new_zeroed::<Rsp>()?;
-        let response = self.request_blocking_into_buf(req, output)?;
-        let rsp = Rsp::read_from_prefix(response.as_ref()).unwrap().0;
-
-        Ok(rsp)
-    }
-
-    pub fn request_async_dma<Rsp: FromBytes + IntoBytes + KnownLayout>(&self, dma: NonNull<[u8]>, fence: u32, allocations: Option<AllocationsBatch>) -> Result<(), NtStatus> {
-        let input = MaybeInlineBuffer::Dma { data: dma };
-        let output = MaybeInlineBuffer::try_new_zeroed::<Rsp>()?;
-
-        let callback = if let Some(allocations) = allocations {
-            Callback::DmaCompletedWithAllocations(fence, allocations)
-        } else {
-            Callback::DmaCompleted(fence)
-        };
-
-        self.request_async_buf(input, output, callback)
-    }
-
-    // Caller MUST call the corresponding KeEvent::set after queuing all the commands
-    pub fn request_async_dma_batched<Rsp: FromBytes + IntoBytes + KnownLayout>(&self, dma: NonNull<[u8]>, fence: u32, allocations: Arc<AllocationsBatch>) -> Result<(), NtStatus> {
-        let input = MaybeInlineBuffer::Dma { data: dma };
-        let output = MaybeInlineBuffer::try_new_zeroed::<Rsp>()?;
-        let callback = Callback::DmaCompletedBatched(fence, allocations);
-
-        self.chan.push(Buffer { input, output, callback });
-        Ok(())
-    }
-
-    */
-
-    //pub fn submit_nop(&self, handler_event: Pin<&KeEvent>, fence: u32) {
-    //    self.nop.push(fence);
-    //    handler_event.set();
-    //}
 }
-
 
 type ControlQueue = Queue<{ gpu::QUEUE_TRANSMIT }, CONTROL_QUEUE_SIZE, CONTROL_FAST_QUEUE_SIZE, MAX_COMMAND_SIZE, MAX_RESPONSE_SIZE>;
 type CursorQueue = Queue<{ gpu::QUEUE_CURSOR }, CURSOR_QUEUE_SIZE, CURSOR_FAST_QUEUE_SIZE, CURSOR_COMMAND_SIZE, CURSOR_RESPONSE_SIZE>;
@@ -1326,11 +1167,9 @@ impl SimpleIdAllocator {
     }
 
     pub fn next(&self) -> Option<u32> {
-        let mut free = self.free.lock();
-        if let Some(id) = free.pop_front() {
+        if let Some(mut free) = self.free.try_lock() && let Some(id) = free.pop_front() {
             return Some(id);
         }
-        drop(free);
 
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         if id != u32::MAX {
@@ -1342,8 +1181,7 @@ impl SimpleIdAllocator {
     }
 
     pub fn free(&self, id: u32) {
-        let mut free = self.free.lock();
-        free.push_back(id);
+        self.free.lock().push_back(id);
     }
 }
 
@@ -1444,6 +1282,7 @@ struct EngineState {
     last_submitted_timestamp: AtomicU64,
     last_completed_timestamp: AtomicU64,
     // TODO: this hangs even though there doesn't seem to be any missed fences
+    // EDIT: This is a deadlock, should no longer be a problem with new rwlock/spinmutex
     //completed_queue: ReorderingQueue,
     suspend_queue: SegQueue<(Weak<Context>, u64)>,
 }
@@ -1490,9 +1329,9 @@ impl EngineState {
     }
 }
 
-struct FenceTracker{
+struct FenceTracker {
     next_fence: AtomicU64,
-    unsignaled: RwLock<SmallVec<[u64; CONTROL_QUEUE_SIZE]>>,
+    unsignaled: RwLock<SmallVec<[u64; CONTROL_QUEUE_SIZE * 2]>>,
 }
 
 impl FenceTracker {
@@ -1577,6 +1416,7 @@ struct GpuData {
     //fence: CachePadded<AtomicU64>,
     fence: FenceTracker,
 
+    // TODO: FAST_MUTEX
     fence_submissions: SpinMutex<SmallVec<[FenceSubmission; 16]>>,
 
     engines: [EngineState; Engine::TOTAL_COUNT as usize],
@@ -2056,6 +1896,9 @@ impl GpuChannel {
         )
     }
 
+    // TODO: mark device as lost on any error in resource_create_blob, create_context etc
+    // It's better to cleanly restart in this case
+    // This could happen if i.e. too many CTS instances are running simultaneously via deqp-runner
     pub fn resource_create_blob(&self, ctx_id: NonZero<u32>, res_id: NonZero<u32>, blob_id: u64, mem: BlobMem, flags: BlobFlag, size: u64) -> Result<(), NtStatus> {
         let cmd = gpu::CmdResourceCreateBlob {
             header: self.new_header(gpu::Command::RESOURCE_CREATE_BLOB, true, Some(ctx_id), None),
@@ -2571,6 +2414,16 @@ impl QueueHandler {
                     error!("{}: error: {:?}", function!(), e);
                 },
             };
+
+            if self.control.queue.available_desc() == 0 {
+                self.pci_transport.notify(gpu::QUEUE_TRANSMIT);
+                self.control.handle_responses(&chan);
+            }
+
+            if self.cursor.queue.available_desc() == 0 {
+                self.pci_transport.notify(gpu::QUEUE_CURSOR);
+                self.cursor.handle_responses(&chan);
+            }
 
             chan.data.handle_fence_submissions();
             for node_ordinal in 0..Engine::TOTAL_COUNT {

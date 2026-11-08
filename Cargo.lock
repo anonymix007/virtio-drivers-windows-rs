@@ -724,6 +724,7 @@ dependencies = [
  "ewdk",
  "log",
  "pin-init",
+ "spin 0.12.3",
  "winresult",
 ]
 

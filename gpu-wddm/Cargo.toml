@@ -9,6 +9,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
+#arrayvec.workspace = true
 bitflags.workspace = true
 #crossbeam.workspace = true
 crossbeam-queue.workspace = true

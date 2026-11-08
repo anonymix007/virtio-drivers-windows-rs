@@ -30,6 +30,7 @@ use wdk::{
         KeTimer,
         NtTime,
     },
+    spin::SpinMutex,
     *,
 };
 
@@ -43,9 +44,9 @@ use virtio_drivers::{
     Dma,
     device::gpu,
 };
+use ::spin::mutex;
 use zerocopy::*;
 use crossbeam_queue::*;
-use spin::mutex::SpinMutex;
 
 pub struct VidPnInterface(D3DKMDT_HVIDPN, *const DXGK_VIDPN_INTERFACE);
 
@@ -1572,7 +1573,8 @@ pub struct VidPnOutput {
     pub current_mode: Option<usize>,
     pub modes: Vec<MonitorMode>,
     pub flipq: Arc<ArrayQueue<(Weak<Allocation>, u64)>>,
-    pub cursor: SpinMutex<Option<Cursor>>,
+    // TODO: FAST_MUTEX
+    pub cursor: mutex::SpinMutex<Option<Cursor>>,
     // pub framebuffer: Option<(NonZero<u32>, Box<[u8]>)>, // res_id, buf
 
     async_cursor_transfer: SyncEvent,
@@ -1611,7 +1613,7 @@ impl VidPnOutput {
             Some(0)
         };
 
-        let cursor = SpinMutex::new(None);
+        let cursor = mutex::SpinMutex::new(None);
 
         Ok(Self {
             current_mode,

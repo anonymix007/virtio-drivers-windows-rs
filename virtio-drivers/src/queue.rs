@@ -451,6 +451,11 @@ impl<H: Hal, const SIZE: usize> VirtQueue<H, SIZE> {
         SIZE - usize::from(self.num_used)
     }
 
+    /// Returns the number of used descriptors.
+    pub fn num_used(&self) -> usize {
+        usize::from(self.num_used)
+    }
+
     /// Unshares buffers in the list starting at descriptor index `head` and adds them to the free
     /// list. Unsharing may involve copying data back to the original buffers, so they must be
     /// passed in too.

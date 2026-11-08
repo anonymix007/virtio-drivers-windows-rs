@@ -11,12 +11,13 @@ path = "src/wdk.rs"
 pin-init.workspace = true
 winresult.workspace = true
 log.workspace = true
+spin = { workspace = true, optional = true }
 
 [build-dependencies]
 bindgen.workspace = true
 ewdk = { path = "../util/ewdk" }
 
 [features]
-default = ["dxgkrnl"]
+default = ["dxgkrnl", "spin"]
 dxgkrnl = []
 wdf = []

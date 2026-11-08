@@ -27,10 +27,9 @@ use alloc::{
     collections::BTreeMap,
 };
 
+use ::spin::mutex;
 use pin_init::*;
 use winresult::STATUS;
-use spin::mutex::SpinMutex;
-use spin::rwlock::RwLock;
 use smallvec::SmallVec;
 use itertools::Itertools;
 
@@ -49,6 +48,10 @@ use wdk::{
         D3DKMT_HANDLE,
         DXGK_PTE,
         MEMORY_CACHING_TYPE,
+    },
+    spin::{
+        RwLock,
+        SpinMutex,
     },
 };
 
@@ -586,7 +589,8 @@ pub struct Allocation {
     resource: VirtioResource,
     busy: (Pin<Arc<KeEvent>>, AtomicUsize),
     sync: RwLock<Vec<NonNull<KeEvent>>>,
-    device_specific: SpinMutex<BTreeMap<NonZero<u32>, Weak<DeviceSpecificAllocation>>>,
+    // TODO: this should be FAST_MUTEX or something
+    device_specific: mutex::SpinMutex<BTreeMap<NonZero<u32>, Weak<DeviceSpecificAllocation>>>,
     cmd: SpinMutex<Option<AlignedBox<[u8]>>>, // This probably can just be an AtomicOptionBox
 }
 
@@ -622,7 +626,7 @@ impl Allocation {
             //sync: SpinMutex::new(Vec::new()),
             sync: RwLock::new(Vec::new()),
             //device_specific: SpinMutex::new(Vec::new()),
-            device_specific: SpinMutex::new(BTreeMap::new()),
+            device_specific: spin::mutex::SpinMutex::new(BTreeMap::new()),
             cmd: SpinMutex::new(cmd),
         })
     }

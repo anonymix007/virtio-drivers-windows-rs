@@ -30,16 +30,19 @@ use alloc::{
 };
 
 use virtio_drivers::device::gpu;
+use ::spin::mutex;
 use winresult::STATUS;
 use zerocopy::*;
 use microseh;
 use offset_allocator;
-use spin::mutex::SpinMutex;
-use spin::rwlock::RwLock;
 use crossbeam_queue::*;
 
 use wdk::{
     dxgkrnl::*,
+    spin::{
+        SpinMutex,
+        RwLock,
+    },
     *,
 };
 use crate::{
@@ -145,7 +148,7 @@ pub struct Device {
     chan: GpuChannel,
     main_context: RwLock<Option<VirtioContext>>,
     virgl_blit_context: RwLock<Option<VirtioContext>>,
-    query_buffer: SpinMutex<Option<QueryBuffer>>,
+    query_buffer: mutex::SpinMutex<Option<QueryBuffer>>,
 }
 
 impl fmt::Debug for Device {
@@ -164,7 +167,7 @@ impl Device {
             chan: parent.queue_channel().ok_or(STATUS::REINITIALIZATION_NEEDED)?,
             main_context: RwLock::new(None),
             virgl_blit_context: RwLock::new(None),
-            query_buffer: SpinMutex::new(None),
+            query_buffer: mutex::SpinMutex::new(None),
         })?)
     }
 
@@ -198,8 +201,8 @@ impl Device {
 
             let mut buf = crate::logger::BufferWriter::<64>::default();
             let _ = write!(buf, "shadow-virgl-{}", params.debug_name());
-
-            self.virgl_blit_context.write().replace(VirtioContext::try_new(self.chan.clone(), capset_id, buf.as_str())?);
+            let blit_context = VirtioContext::try_new(self.chan.clone(), capset_id, buf.as_str())?;
+            self.virgl_blit_context.write().replace(blit_context);
         }
 
         debug!("{}: debug name {}, main {:?}, blit {:?}", function!(), params.debug_name(), self.main_context, self.virgl_blit_context);

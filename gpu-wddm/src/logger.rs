@@ -2,61 +2,15 @@ use core::fmt::{Write, Error};
 use core::cell::UnsafeCell;
 
 use log::{LevelFilter, Log, Metadata, Record, SetLoggerError};
-use spin::Spin;
-use spin::mutex::spin::{SpinMutex, SpinMutexGuard};
+use wdk::spin::{
+    TimeoutMutex,
+};
 // TODO: aarch64
 use uart_16550::{Config, Uart16550Tty, backend::PioBackend};
 
 type SerialPort = Uart16550Tty<PioBackend>;
 
 use crossbeam_queue::ArrayQueue;
-
-struct TimeoutMutex<T>(SpinMutex<T>);
-
-impl<T> TimeoutMutex<T> {
-    pub const fn new(value: T) -> Self {
-        Self(SpinMutex::new(value))
-    }
-
-    pub fn lock(&self) -> SpinMutexGuard<'_, T> {
-        self.0.lock()
-    }
-
-    pub unsafe fn force_unlock(&self) {
-        unsafe {
-            self.0.force_unlock();
-        }
-    }
-
-    pub fn is_locked(&self) -> bool {
-        self.0.is_locked()
-    }
-
-    pub fn try_lock(&self) -> Option<SpinMutexGuard<'_, T>> {
-        self.0.try_lock()
-    }
-
-    pub fn try_lock_weak(&self) -> Option<SpinMutexGuard<'_, T>> {
-        self.0.try_lock_weak()
-    }
-
-    pub fn try_lock_timeout(&self, iterations: usize) -> Option<SpinMutexGuard<'_, T>> {
-        for _ in 0..5 {
-            if let Some(guard) = self.try_lock_weak() {
-                return Some(guard);
-            }
-
-            for _ in 0..iterations {
-                if !self.is_locked() {
-                    break;
-                }
-
-                core::hint::spin_loop();
-            }
-        }
-        None
-    }
-}
 
 pub struct BufferWriter<const MAX_LEN: usize> {
     len: u16,
@@ -186,7 +140,7 @@ pub unsafe fn force_flush() {
             uart
         } else {
             unsafe {
-                LOGGER.as_logger().uart.0.force_unlock();
+                LOGGER.as_logger().uart.force_unlock();
             }
             LOGGER.as_logger().uart.lock()
         };

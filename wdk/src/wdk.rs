@@ -17,3 +17,5 @@ pub mod wdm;
 pub mod dxgkrnl;
 #[cfg(feature = "wdf")]
 pub mod wdf;
+#[cfg(feature = "spin")]
+pub mod spin;
