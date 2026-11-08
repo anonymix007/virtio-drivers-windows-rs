@@ -1540,20 +1540,30 @@ impl Cursor {
         }
     }
 
-    fn transfer_pixels(&self, chan: &GpuChannel) -> Result<(), NtStatus> {
-        self.pixels.transfer_to_host(chan)
-    }
-
     fn r#move(&self, chan: &GpuChannel, scanout: u32) -> Result<(), NtStatus> {
         let (x, y) = self.position;
         chan.move_cursor(scanout, x, y)
     }
 
-    fn update(&self, chan: &GpuChannel, scanout: u32) -> Result<(), NtStatus> {
+    pub fn update(&self, chan: &GpuChannel, scanout: u32) -> Result<(), NtStatus> {
         let (x, y) = self.position;
         let (x_hot, y_hot) = self.hotspot;
         let res_id = self.pixels.id;
         chan.update_cursor(scanout, res_id, x_hot, y_hot, x, y)
+    }
+
+    fn transfer_and_update_async(&self, chan: &GpuChannel, event: &SyncEvent, scanout: u32) -> Result<(), NtStatus> {
+        let (x, y) = self.position;
+        let (x_hot, y_hot) = self.hotspot;
+        let res_id = self.pixels.id;
+
+        let rect = gpu::Rect {
+            x: 0,
+            y: 0,
+            width: self.pixels.width,
+            height: self.pixels.height,
+        };
+        chan.resource_transfer_to_cursor_async(rect, 0, self.pixels.id, scanout, x_hot, y_hot, x, y, event)
     }
 }
 
@@ -1564,10 +1574,14 @@ pub struct VidPnOutput {
     pub flipq: Arc<ArrayQueue<(Weak<Allocation>, u64)>>,
     pub cursor: SpinMutex<Option<Cursor>>,
     // pub framebuffer: Option<(NonZero<u32>, Box<[u8]>)>, // res_id, buf
+
+    async_cursor_transfer: SyncEvent,
 }
 
 impl VidPnOutput {
-    pub fn new(info: gpu::DisplayOne, edid: Box<gpu::Edid>) -> Self {
+    pub fn new(info: gpu::DisplayOne, edid: Box<gpu::Edid>) -> Result<Self, NtStatus> {
+        let async_cursor_transfer = SyncEvent::new()?;
+
         let preferred = if info.rect.width < 640 || info.rect.height < 480 {
             edid.preferred_resolution().unwrap()
         } else {
@@ -1599,13 +1613,14 @@ impl VidPnOutput {
 
         let cursor = SpinMutex::new(None);
 
-        Self {
+        Ok(Self {
             current_mode,
             edid,
             modes,
             flipq,
             cursor,
-        }
+            async_cursor_transfer,
+        })
     }
 
     pub fn hide_cursor(&self, scanout: u32, chan: &GpuChannel, empty: &Cursor) -> Result<(), NtStatus> {
@@ -1650,6 +1665,7 @@ impl VidPnOutput {
     }
 
     pub fn update_cursor_bgra(&self, scanout: u32, chan: &GpuChannel, y_hot: u32, x_hot: u32, pixels: &[u8], stride: usize) -> Result<(), NtStatus> {
+        self.async_cursor_transfer.wait_exp(chan, Some(1_000))?;
         let mut cursor = self.cursor.lock();
 
         if let Some(cursor) = cursor.as_mut() {
@@ -1658,11 +1674,11 @@ impl VidPnOutput {
             *cursor = Some(Cursor::try_new(chan, 64, 64, y_hot, x_hot, 0, 0)?);
         }
         cursor.as_mut().unwrap().write_bgra(pixels, stride);
-        cursor.as_ref().unwrap().transfer_pixels(chan)?;
-        cursor.as_ref().unwrap().update(chan, scanout)
+        cursor.as_ref().unwrap().transfer_and_update_async(chan, &self.async_cursor_transfer, scanout)
     }
 
     pub fn update_cursor_mono(&self, scanout: u32, chan: &GpuChannel, y_hot: u32, x_hot: u32, mask: &[u8], stride: usize) -> Result<(), NtStatus> {
+        self.async_cursor_transfer.wait_exp(chan, Some(1_000))?;
         let mut cursor = self.cursor.lock();
 
         if let Some(cursor) = cursor.as_mut() {
@@ -1671,11 +1687,11 @@ impl VidPnOutput {
             *cursor = Some(Cursor::try_new(chan, 64, 64, y_hot, x_hot, 0, 0)?);
         }
         cursor.as_mut().unwrap().write_mono(mask, stride);
-        cursor.as_ref().unwrap().transfer_pixels(chan)?;
-        cursor.as_ref().unwrap().update(chan, scanout)
+        cursor.as_ref().unwrap().transfer_and_update_async(chan, &self.async_cursor_transfer, scanout)
     }
 
     pub fn update_cursor_masked_color(&self, scanout: u32, chan: &GpuChannel, y_hot: u32, x_hot: u32, masked_color: &[u8], stride: usize) -> Result<(), NtStatus> {
+        self.async_cursor_transfer.wait_exp(chan, Some(1_000))?;
         let mut cursor = self.cursor.lock();
 
         if let Some(cursor) = cursor.as_mut() {
@@ -1684,8 +1700,7 @@ impl VidPnOutput {
             *cursor = Some(Cursor::try_new(chan, 64, 64, y_hot, x_hot, 0, 0)?);
         }
         cursor.as_mut().unwrap().write_masked_color(masked_color, stride);
-        cursor.as_ref().unwrap().transfer_pixels(chan)?;
-        cursor.as_ref().unwrap().update(chan, scanout)
+        cursor.as_ref().unwrap().transfer_and_update_async(chan, &self.async_cursor_transfer, scanout)
     }
 }
 
@@ -1710,9 +1725,7 @@ pub struct Framebuffer {
 impl Framebuffer {
     pub fn try_new(chan: &GpuChannel, width: u32, height: u32, format: gpu::Format) -> Result<Self, NtStatus> {
         let id = chan.resource_create_2d(width, height, format)?;
-
         let size = (width as usize) * (height as usize) * format.stride();
-
         let pixels = {
             let data = Box::<[u8], _>::try_new_zeroed_slice_in(size, AlignedAlloc)?;
             unsafe { data.assume_init() }

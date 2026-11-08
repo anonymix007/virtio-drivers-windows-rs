@@ -1400,7 +1400,7 @@ impl Adapter {
                 system_display_resolution = Some(preferred_resolution);
             }
 
-            let info = VidPnOutput::new(display_modes[scanout], edid);
+            let info = VidPnOutput::new(display_modes[scanout], edid)?;
 
             debug!("scanout {}: {:?}", scanout, info);
             for (i, mode) in info.modes.iter().enumerate() {

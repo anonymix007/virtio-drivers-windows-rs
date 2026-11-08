@@ -188,6 +188,48 @@ impl<T> BlockingBuffer<T> {
     }
 }
 
+#[derive(Clone)]
+pub struct SyncEvent(Pin<Arc<KeEvent>>);
+impl SyncEvent {
+    pub fn new() -> Result<Self, NtStatus> {
+        Ok(Self(Arc::try_pin_init(KeEvent::new(EventType::Synchronization, true))?))
+    }
+
+    pub fn set(&self) {
+        self.0.set();
+    }
+
+    pub fn wait(&self, timeout: NtTime) -> Result<(), NtStatus> {
+        self.0.wait(timeout)?;
+        Ok(())
+    }
+
+    pub fn wait_exp(&self, chan: &GpuChannel, max_timeout_ms: Option<u32>) -> Result<(), NtStatus> {
+        let mut timeout_ms = DEFAULT_BLOCKING_TIMEOUT;
+
+        loop {
+            match self.wait(NtTime::relative_ms(timeout_ms)) {
+                Ok(()) => return Ok(()),
+                Err(NtStatus(STATUS::TIMEOUT)) => {
+                    timeout_ms *= 2;
+                    chan.kick();
+                    if let Some(max_timeout_ms) = max_timeout_ms && timeout_ms > max_timeout_ms {
+                        warn!("{}: timed out waiting for event, maximum reached", function!());
+                        return Ok(());
+                    }
+
+                    warn!("{}: timed out waiting for event, retrying with timeout {:?}", function!(), timeout_ms);
+                    continue;
+                }
+                Err(e) => {
+                    error!("{}: failed to wait for event: {:?}", function!(), e);
+                    return Err(e);
+                },
+            }
+        }
+    }
+}
+
 //#[repr(transparent)]
 //#[derive(Clone)]
 //struct CancellationSignal(Arc<AtomicBool>);
@@ -257,10 +299,21 @@ impl<const MAX_INLINE: usize> Into<Callback<MAX_INLINE>> for SubmitCommandCallba
     }
 }
 
+#[derive(Debug)]
+struct UpdateCursor {
+    x: u32,
+    y: u32,
+    resource_id: NonZero<u32>,
+    scanout_id: u32,
+    hot_x: u16,
+    hot_y: u16,
+}
+
 enum Callback<const MAX_INLINE: usize> {
     None,
-    SetEvent(BlockingBuffer<MaybeInlineBuffer<MAX_INLINE>>),
-    //SetEvent(NonNull<KeEvent>, Option<NonNull<MaybeUninit<MaybeInlineBuffer<MAX_INLINE>>>>, CancellationSignal),
+    Blocking(BlockingBuffer<MaybeInlineBuffer<MAX_INLINE>>),
+    SetEvent(SyncEvent),
+    UpdateCursor(SyncEvent, UpdateCursor),
     FreeContextId(NonZero<u32>),
     FreeResourceId(NonZero<u32>),
     DmaCompleted(Engine, u32),
@@ -599,7 +652,7 @@ struct Queue<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize
     //last_submitted_fence: AtomicU64,
 }
 
-const DEFAULT_BLOCKING_TIMEOUT: NtTime = NtTime::relative_ms(5_000);
+const DEFAULT_BLOCKING_TIMEOUT: u32 = 5_000;
 
 #[derive(Clone)]
 struct QueueChannel<const IN: usize, const OUT: usize>(Pin<Arc<AsyncQueue<Buffer<IN, OUT>>>>);
@@ -624,50 +677,43 @@ impl<const IN: usize, const OUT: usize> QueueChannel<IN, OUT> {
         self.request_async_into_buf(req, output, callback)
     }
 
-    pub fn request_blocking_buf(&self, input: MaybeInlineBuffer<IN>, output: MaybeInlineBuffer<OUT>, timeout: NtTime) -> Result<MaybeInlineBuffer<OUT>, NtStatus> {
+    pub fn request_blocking_buf(&self, input: MaybeInlineBuffer<IN>, output: MaybeInlineBuffer<OUT>, mut timeout_ms: u32, chan: &GpuChannel) -> Result<MaybeInlineBuffer<OUT>, NtStatus> {
         let block = BlockingBuffer::<MaybeInlineBuffer<OUT>>::new()?;
-        let callback = Callback::SetEvent(block.clone());
+        let callback = Callback::Blocking(block.clone());
 
-        //let signal = CancellationSignal::new();
-        //let mut response = pin!(MaybeUninit::<MaybeInlineBuffer<OUT>>::uninit());
-        //stack_pin_init!(let block = KeEvent::new(EventType::Notification, false));
-        //let callback = unsafe {
-        //    Callback::SetEvent(
-        //        NonNull::new_unchecked(block.as_mut().get_unchecked_mut()),
-        //        Some(NonNull::new_unchecked(response.as_mut().get_unchecked_mut())),
-        //        signal.clone()
-        //    )
-        //};
+        let req = gpu::CtrlHeader::read_from_prefix(input.as_ref()).unwrap().0;
 
         self.request_async_buf(input, output, callback)?;
 
-        block.wait(timeout).inspect_err(|e| {
-            block.cancel();
-            error!("failed to wait for request: {:?}", e)
-        })?;
+        loop {
+            match block.wait(NtTime::relative_ms(timeout_ms)) {
+                Ok(()) => break,
+                Err(NtStatus(STATUS::TIMEOUT)) => {
+                    timeout_ms *= 2;
+                    chan.kick();
+                    warn!("{}: timed out waiting for {:?}, retrying with timeout {:?}", function!(), req, timeout_ms);
+                    continue;
+                }
+                Err(e) => {
+                    error!("{}: failed to wait for request: {:?}", function!(), e);
+                    break;
+                },
+            }
+        }
 
         block.read().ok_or(NtStatus(STATUS::IO_DEVICE_ERROR)).inspect_err(|_|
-            error!("failed to get for responce: data is None")
+            error!("{}: failed to get response for req {:?}: data is None", function!(), req)
         )
     }
 
-    pub fn request_blocking_into_buf<Req: IntoBytes + Immutable + KnownLayout>(&self, req: Req, output: MaybeInlineBuffer<OUT>) -> Result<MaybeInlineBuffer<OUT>, NtStatus> {
+    pub fn request_blocking_into_buf<Req: IntoBytes + Immutable + KnownLayout>(&self, req: Req, output: MaybeInlineBuffer<OUT>, chan: &GpuChannel) -> Result<MaybeInlineBuffer<OUT>, NtStatus> {
         let input = MaybeInlineBuffer::try_from_value(req)?;
-        self.request_blocking_buf(input, output, DEFAULT_BLOCKING_TIMEOUT)
+        self.request_blocking_buf(input, output, DEFAULT_BLOCKING_TIMEOUT, chan)
     }
 
-    pub fn request_blocking<Req: IntoBytes + Immutable + KnownLayout, Rsp: FromBytes + IntoBytes + KnownLayout>(&self, req: Req) -> Result<Rsp, NtStatus> {
+    pub fn request_blocking<Req: IntoBytes + Immutable + KnownLayout, Rsp: FromBytes + IntoBytes + KnownLayout>(&self, req: Req, chan: &GpuChannel) -> Result<Rsp, NtStatus> {
         let output = MaybeInlineBuffer::try_new_zeroed::<Rsp>()?;
-        let response = self.request_blocking_into_buf(req, output)?;
-        let rsp = Rsp::read_from_prefix(response.as_ref()).unwrap().0;
-
-        Ok(rsp)
-    }
-
-    pub fn request_blocking_with_timeout<Req: IntoBytes + Immutable + KnownLayout, Rsp: FromBytes + IntoBytes + KnownLayout>(&self, req: Req, timeout: NtTime) -> Result<Rsp, NtStatus> {
-        let input = MaybeInlineBuffer::try_from_value(req)?;
-        let output = MaybeInlineBuffer::try_new_zeroed::<Rsp>()?;
-        let response = self.request_blocking_buf(input, output, timeout)?;
+        let response = self.request_blocking_into_buf(req, output, chan)?;
         let rsp = Rsp::read_from_prefix(response.as_ref()).unwrap().0;
 
         Ok(rsp)
@@ -982,7 +1028,7 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         }
     }
 
-    fn response(&mut self, data: &GpuData) -> Result<Option<()>, NtStatus> {
+    fn response(&mut self, chan: &GpuChannel) -> Result<Option<()>, NtStatus> {
         let Some((i, len)) = self.pop_from_device()? else {
             return Ok(None);
         };
@@ -1015,7 +1061,7 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         self.check_response(i);
 
         if let Some(virtio_fence) = self.read_completed_fence(i) {
-            data.fence.signal(virtio_fence);
+            chan.data.fence.signal(virtio_fence);
         }
 
         match callback {
@@ -1023,7 +1069,7 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
                 self.mark_free(i);
             },
 
-            Callback::SetEvent(block) => {
+            Callback::Blocking(block) => {
                 //trace!("response: setting event");
                 let output = self.buffers.outputs[i].take().unwrap();
                 if !block.cancelled() {
@@ -1033,26 +1079,38 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
                 block.set();
             },
 
+            Callback::SetEvent(event) => {
+                self.mark_free(i);
+                event.set();
+            }
+
+            Callback::UpdateCursor(event, update) => {
+                self.mark_free(i);
+                let err = chan.update_cursor(update.scanout_id, update.resource_id, update.hot_x as _, update.hot_y as _, update.x, update.y);
+                event.set();
+                err?;
+            }
+
             Callback::FreeResourceId(id) => {
-                data.resource_id.free(id.get());
+                chan.data.resource_id.free(id.get());
                 self.mark_free(i);
             },
 
             Callback::FreeContextId(id) => {
-                data.context_id.free(id.get());
+                chan.data.context_id.free(id.get());
                 self.mark_free(i);
             },
 
             Callback::DmaCompleted(engine, fence) => {
                 trace!("response: dma completed: {}", fence);
-                data.notify_dma_completed(engine, fence);
+                chan.data.notify_dma_completed(engine, fence);
                 self.mark_free(i);
             },
 
             Callback::DmaCompletedWithAllocations(engine, fence, allocations) => {
                 trace!("response: dma completed: {} / {:?}", fence, allocations);
                 drop(allocations);
-                data.notify_dma_completed(engine, fence);
+                chan.data.notify_dma_completed(engine, fence);
                 self.mark_free(i);
             },
 
@@ -1062,14 +1120,14 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
                 if let Some(alloc) = Arc::into_inner(allocations) {
                     trace!("response: batched dma completed (last): {:?}", alloc);
                     drop(alloc);
-                    data.notify_dma_completed(engine, fence)
+                    chan.data.notify_dma_completed(engine, fence)
                 }
 
                 self.mark_free(i);
             },
 
             Callback::DmaCompletedHwQueue(hw_queue, fence) => {
-                data.notify_hw_queue(hw_queue, fence);
+                chan.data.notify_hw_queue(hw_queue, fence);
 
                 self.mark_free(i);
             },
@@ -1078,9 +1136,9 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
         Ok(Some(()))
     }
 
-    pub fn handle_responses(&mut self, data: &GpuData) {
+    pub fn handle_responses(&mut self, chan: &GpuChannel) {
         loop {
-            match self.response(data) {
+            match self.response(chan) {
                 Ok(None) => return,
                 Ok(Some(())) => continue,
                 Err(e) => {
@@ -1806,7 +1864,7 @@ impl GpuChannel {
             _padding: 0,
         };
 
-        let resp: gpu::RespCapsetInfo = self.control.request_blocking(cmd)?;
+        let resp: gpu::RespCapsetInfo = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.header.check_type(gpu::Command::OK_CAPSET_INFO))?;
 
         let id = resp.capset_id;
@@ -1862,7 +1920,7 @@ impl GpuChannel {
         };
 
         let output = MaybeInlineBuffer::try_new_zeroed_size(size_of::<gpu::CtrlHeader>() + (info.size as usize))?;
-        let output = self.control.request_blocking_into_buf(cmd, output)?;
+        let output = self.control.request_blocking_into_buf(cmd, output, self)?;
 
         let hdr: gpu::CtrlHeader = gpu::CtrlHeader::read_from_prefix(output.as_ref()).unwrap().0;
         map_virtio_error!(hdr.check_type(gpu::Command::OK_CAPSET))?;
@@ -1875,7 +1933,7 @@ impl GpuChannel {
 
         let cmd = self.new_header(gpu::Command::GET_DISPLAY_INFO, true, None, None);
 
-        let resp: gpu::RespDisplayInfo = self.control.request_blocking(cmd)?;
+        let resp: gpu::RespDisplayInfo = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.header.check_type(gpu::Command::OK_DISPLAY_INFO))?;
 
         Ok(resp.pmodes)
@@ -1903,7 +1961,7 @@ impl GpuChannel {
             }
         };
 
-        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA))?;
 
         Ok(ctx_id)
@@ -1926,7 +1984,7 @@ impl GpuChannel {
             height,
         };
 
-        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_| {
             warn!("{}: failed to create resource 2d {}", function!(), resource_id.get());
             self.data.resource_id.free(resource_id.get())
@@ -1953,7 +2011,7 @@ impl GpuChannel {
             _padding: 0,
         };
 
-        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_| {
             warn!("{}: failed to create resource 3d {}", function!(), resource_id.get());
             self.data.resource_id.free(resource_id.get())
@@ -1968,7 +2026,7 @@ impl GpuChannel {
             resource_id: res_id.get(),
             _padding: 0,
         };
-        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
             warn!("{}: failed to attach resource {} to context {}", function!(), res_id.get(), ctx_id.get())
         )
@@ -1980,7 +2038,7 @@ impl GpuChannel {
             resource_id: res_id.get(),
             _padding: 0,
         };
-        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
             warn!("{}: failed to detach resource {} from context {}", function!(), res_id.get(), ctx_id.get())
         )
@@ -1997,7 +2055,7 @@ impl GpuChannel {
             size,
         };
 
-        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
             warn!("{}: failed to create resource blob {} ({})", function!(), res_id.get(), blob_id)
         )?;
@@ -2018,7 +2076,7 @@ impl GpuChannel {
             offset: bar_offset,
         };
 
-        let map_info = self.control.request_blocking::<_, gpu::RespMapInfo>(cmd)?;
+        let map_info = self.control.request_blocking::<_, gpu::RespMapInfo>(cmd, self)?;
         map_virtio_error!(map_info.header.check_type(gpu::Command::OK_MAP_INFO)).inspect_err(|_|
             warn!("{}: failed to map blob {}", function!(), res_id.get())
         )?;
@@ -2039,7 +2097,6 @@ impl GpuChannel {
         Ok(())
     }
 
-    // TODO: maybe add a special async callback type for set_cursor / set_scanout + flush
     pub fn resource_transfer_to_host_2d(&self, rect: gpu::Rect, offset: u64, resource_id: NonZero<u32>) -> Result<(), NtStatus> {
         let cmd = gpu::TransferToHost2D {
             header: self.new_header(gpu::Command::TRANSFER_TO_HOST_2D, true, None, None),
@@ -2049,11 +2106,39 @@ impl GpuChannel {
             _padding: 0,
         };
 
-        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_| {
             warn!("{}: failed to transfer resource 2d {}", function!(), resource_id.get());
             self.data.resource_id.free(resource_id.get())
         })?;
+
+        Ok(())
+    }
+
+
+    pub fn resource_transfer_to_cursor_async(&self, rect: gpu::Rect, offset: u64, resource_id: NonZero<u32>, scanout_id: u32, hot_x: u32, hot_y: u32, x: u32, y: u32, event: &SyncEvent) -> Result<(), NtStatus> {
+        let cmd = gpu::TransferToHost2D {
+            header: self.new_header(gpu::Command::TRANSFER_TO_HOST_2D, true, None, None),
+            rect,
+            offset,
+            resource_id: resource_id.get(),
+            _padding: 0,
+        };
+
+        let cursor = UpdateCursor {
+            x,
+            y,
+            scanout_id,
+            resource_id,
+            hot_x: hot_x as _,
+            hot_y: hot_y as _,
+        };
+
+        let input = MaybeInlineBuffer::try_from_value(cmd)?;
+        let output = MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?;
+        let callback = Callback::UpdateCursor(event.clone(), cursor);
+
+        self.control.request_async_buf(input, output, callback)?;
 
         Ok(())
     }
@@ -2077,7 +2162,7 @@ impl GpuChannel {
             _padding: 0,
         };
 
-        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd)?;
+        let resp: gpu::CtrlHeader = self.control.request_blocking(cmd, self)?;
         map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
             warn!("{}: failed to detach backing from resource {}", function!(), id.get())
         )?;
@@ -2118,7 +2203,7 @@ impl GpuChannel {
         //    MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?
         //};
 
-        self.control.request_blocking_buf(input, output, DEFAULT_BLOCKING_TIMEOUT)?;
+        self.control.request_blocking_buf(input, output, DEFAULT_BLOCKING_TIMEOUT, self)?;
 
         Ok(())
     }
@@ -2248,7 +2333,7 @@ impl GpuChannel {
             _padding: 0,
         };
 
-        let out = self.control.request_blocking_into_buf(cmd, MaybeInlineBuffer::try_new_zeroed::<gpu::RespEdid>()?)?;
+        let out = self.control.request_blocking_into_buf(cmd, MaybeInlineBuffer::try_new_zeroed::<gpu::RespEdid>()?, self)?;
 
         let resp = gpu::RespEdid::ref_from_prefix(out.as_ref()).map_err(|e| {
             error!("{}: failed to request EDID for scanout {}: {:?}", function!(), scanout, e);
@@ -2312,7 +2397,7 @@ impl GpuChannel {
 
     pub fn move_cursor(&self, scanout_id: u32, x: u32, y: u32) -> Result<(), NtStatus> {
         let cmd = gpu::UpdateCursor {
-            header: self.new_header(gpu::Command::MOVE_CURSOR, true, None, None),
+            header: self.new_header(gpu::Command::MOVE_CURSOR, false, None, None),
             pos: gpu::CursorPos {
                 scanout_id,
                 x,
@@ -2342,7 +2427,7 @@ impl GpuChannel {
 
     pub fn update_cursor(&self, scanout_id: u32, resource_id: NonZero<u32>, hot_x: u32, hot_y: u32, x: u32, y: u32) -> Result<(), NtStatus> {
         let cmd = gpu::UpdateCursor {
-            header: self.new_header(gpu::Command::UPDATE_CURSOR, true, None, None),
+            header: self.new_header(gpu::Command::UPDATE_CURSOR, false, None, None),
             pos: gpu::CursorPos {
                 scanout_id,
                 x,
@@ -2455,7 +2540,7 @@ impl QueueHandler {
             select! {
                 events.control_irq => {
                     //trace!("- new control response");
-                    self.control.handle_responses(&chan.data);
+                    self.control.handle_responses(&chan);
                     // We need this in case queue was full last time we got a control request
                     self.control.handle_requests(&mut self.pci_transport);
                 },
@@ -2466,13 +2551,13 @@ impl QueueHandler {
                 },
                 events.cursor_irq => {
                     //trace!("- new cursor response");
-                    self.cursor.handle_responses(&chan.data);
+                    self.cursor.handle_responses(&chan);
                     // We need this in case queue was full last time we got a cursor request
                     self.cursor.handle_requests(&mut self.pci_transport);
                 },
                 cursor_msg => {
                     //trace!("- new cursor request");
-                    self.cursor.handle_responses(&chan.data);
+                    self.cursor.handle_responses(&chan);
                 },
                 events.config_irq => {
                     // TODO
