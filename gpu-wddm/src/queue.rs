@@ -316,6 +316,7 @@ enum Callback<const MAX_INLINE: usize> {
     UpdateCursor(SyncEvent, UpdateCursor),
     FreeContextId(NonZero<u32>),
     FreeResourceId(NonZero<u32>),
+    FreeOffset(offset_allocator::Allocation),
     DmaCompleted(Engine, u32),
     DmaCompletedWithAllocations(Engine, u32, AllocationsBatch),
     DmaCompletedBatched(Engine, u32, Arc<AllocationsBatch>),
@@ -1098,6 +1099,11 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
 
             Callback::FreeContextId(id) => {
                 chan.data.context_id.free(id.get());
+                self.mark_free(i);
+            },
+
+            Callback::FreeOffset(offset) => {
+                chan.data.offset_allocator.lock().free(offset);
                 self.mark_free(i);
             },
 
@@ -2085,14 +2091,12 @@ impl GpuChannel {
     }
 
     pub fn resource_unmap_blob(&self, id: NonZero<u32>, offset: offset_allocator::Allocation) -> Result<(), NtStatus> {
-        self.data.offset_allocator.lock().free(offset);
-
         let cmd = gpu::CmdResourceUnmapBlob {
             header: self.new_header(gpu::Command::RESOURCE_UNMAP_BLOB, true, None, None),
             resource_id: id.get(),
             _padding: 0,
         };
-        self.control.request_blocking::<_, gpu::CtrlHeader>(cmd)?;
+        self.control.request_async::<_, gpu::CtrlHeader>(cmd, Callback::FreeOffset(offset))?;
 
         Ok(())
     }
