@@ -768,7 +768,7 @@ impl Device {
             },
             Ok(Err(e)) => {
                 error!("{}: invalid buffer: {:?}", function!(), e);
-                return Err(NtStatus(STATUS::INVALID_PARAMETER));
+                return Err(e);
             },
             Err(e) => {
                 error!("{}: failed to validate buffer: {:?}", function!(), e);
