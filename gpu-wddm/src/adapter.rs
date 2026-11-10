@@ -61,6 +61,7 @@ use wdk::{
         MdlOwned,
         mm_map_locked_pages_specify_cache,
         mm_unmap_locked_pages,
+        ke_query_performance_counter,
     },
     spin::RwLock,
     *,
@@ -459,6 +460,7 @@ pub enum Interrupt {
     DmaPreempted(Engine, u32, u32),
     DmaFaulted(Engine, u32),
     VSync([Option<PHYSICAL_ADDRESS>; 16]),
+    VSyncCompleted(u64, u32),
     MonitoredFenceSignaled(Engine),
     SuspendContextCompleted(HANDLE, u64),
 }
@@ -660,6 +662,8 @@ impl DxgkInterface {
                     true as _
                 },
                 Interrupt::VSync(addrs) => {
+                    //warn!("{}: vsync-many: {:?}", function!(), ke_query_performance_counter());
+
                     for (i, addr) in addrs.iter().enumerate() {
                         let Some(addr) = addr else {
                             continue;
@@ -679,6 +683,22 @@ impl DxgkInterface {
                     context.interface.queue_dpc();
                     true as _
                 },
+
+                Interrupt::VSyncCompleted(addr, scanout) => {
+                    //warn!("{}: vsync-single: {:?}", function!(), ke_query_performance_counter());
+                    let mut interrupt: DXGKARGCB_NOTIFY_INTERRUPT_DATA = unsafe { zeroed() };
+                    interrupt.InterruptType = DXGK_INTERRUPT_TYPE::DXGK_INTERRUPT_CRTC_VSYNC;
+
+                    let vsync = unsafe { interrupt.__bindgen_anon_1.CrtcVsync.as_mut() };
+                    vsync.VidPnTargetId = scanout;
+                    vsync.PhysicalAddress = PHYSICAL_ADDRESS { QuadPart: addr as _ };
+
+                    context.interface.notify_interrupt(interrupt);
+
+                    context.interface.queue_dpc();
+                    true as _
+                },
+
                 Interrupt::MonitoredFenceSignaled(engine) => {
                     let mut interrupt: DXGKARGCB_NOTIFY_INTERRUPT_DATA = unsafe { zeroed() };
                     interrupt.InterruptType = DXGK_INTERRUPT_TYPE::DXGK_INTERRUPT_MONITORED_FENCE_SIGNALED;
@@ -1502,10 +1522,10 @@ impl Adapter {
                    > No generation of a DMA buffer to pass in a call to its DxgkDdiPresent function (that is, NULL is passed in the pDmaBuffer member of the DXGKARG_PRESENT structure).
                    But maybe this does not actually require performing blit? Need to test this later, should just work if so */
                 driver_caps.FlipCaps.set_FlipOnVSyncMmIo(true);
-                driver_caps.FlipCaps.set_FlipOnVSyncWithNoWait(true);
+                //driver_caps.FlipCaps.set_FlipOnVSyncWithNoWait(true);
                 /* Should be doable, but why bother */
-                driver_caps.FlipCaps.set_FlipInterval(true);
-                driver_caps.FlipCaps.set_FlipImmediateMmIo(true);
+                // driver_caps.FlipCaps.set_FlipInterval(true);
+                // driver_caps.FlipCaps.set_FlipImmediateMmIo(true);
                 /* Should work, might need to special case present for this */
                 driver_caps.FlipCaps.set_FlipIndependent(true);
 
@@ -2833,7 +2853,6 @@ impl Adapter {
             match topology.get_num_paths_from_source(source as D3DDDI_VIDEO_PRESENT_SOURCE_ID) {
                 Ok(num_paths) => {
                     if num_paths > state.num_scanouts as _ {
-                        is_supported_vidpn.IsVidPnSupported = true as _;
                         return Ok(());
                     }
                 },
@@ -3021,7 +3040,11 @@ impl Adapter {
         trace!("{}", function!());
         match interrupt {
             DXGK_INTERRUPT_TYPE::DXGK_INTERRUPT_CRTC_VSYNC => {
-                self.flip_timer.as_ref().unwrap().inner.vsync_enabled.store(enabled, Ordering::SeqCst);
+                if let Some(flip_timer) = self.flip_timer.as_ref() {
+                    flip_timer.inner.vsync_enabled.store(enabled, Ordering::SeqCst);
+                } else {
+                    debug!("{}: cannot control vsync interrupts after adapter stop", function!());
+                }
             },
             _ => {
                 warn!("{}: not implemented: {:?}", function!(), interrupt);
@@ -3035,8 +3058,7 @@ impl Adapter {
         let targets = self.targets_for_source(source)?;
 
         for &scanout in targets {
-            let weak = Arc::downgrade(alloc);
-            if let Some((dropped_addr, dropped_alloc)) = state.outputs[scanout as usize].as_ref().unwrap().flipq.force_push((weak, addr)) {
+            if let Some((dropped_addr, dropped_alloc)) = state.outputs[scanout as usize].as_ref().unwrap().flipq.force_push((alloc.clone(), addr)) {
                 warn!("{}: dropped scanout: {:?}", function!(), dropped_alloc);
             }
         }

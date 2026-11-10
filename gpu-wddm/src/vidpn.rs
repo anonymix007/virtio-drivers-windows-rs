@@ -999,7 +999,7 @@ impl MonitorMode {
 pub struct FlipTimerContext {
     pub addrs: [AtomicU64; 16],
     //pub addrs: [(AtomicU64, AtomicPtr<Allocation>); 16],
-    pub flipq: [Option<Arc<ArrayQueue<(Weak<Allocation>, u64)>>>; 16],
+    pub flipq: [Option<Arc<ArrayQueue<(Arc<Allocation>, u64)>>>; 16],
     pub vsync_enabled: AtomicBool,
     pub chan: GpuChannel,
 }
@@ -1010,55 +1010,25 @@ impl FlipTimerContext {
     fn flip(&self) {
         let mut scanouts = [None; 16];
         let mut scanout_sent = false;
+        let mut old_scanouts = false;
 
         for (i, q) in self.flipq.iter().enumerate() {
             let Some(q) = q else {
                 continue;
             };
 
-            let Some((weak, addr)) = q.pop() else {
+            if self.chan.flips_pending(i as u32) {
+                continue;
+            }
+
+            let Some((alloc, addr)) = q.pop() else {
                 let addr = self.addrs[i].load(Ordering::Acquire);
-                //let addr = self.addrs[i].0.load(Ordering::Acquire);
-                scanouts[i] = Some(PHYSICAL_ADDRESS { QuadPart: addr as i64 });
-                /*
-                let alloc = self.addrs[i].1.load(Ordering::SeqCst) as *const Allocation;
-                if !alloc.is_null() {
-                    let weak = unsafe { Weak::from_raw(alloc) };
-
-                    let Some(alloc) = weak.upgrade() else {
-                        error!("{}: allocation no longer exists: strong {}, weak {}", function!(), weak.strong_count(), weak.weak_count());
-                        self.addrs[i].1.store(null_mut(), Ordering::SeqCst);
-                        continue;
-                    };
-
-                    let _ = weak.into_raw();
-
-                    let Some(res_id) = alloc.id() else {
-                        error!("{}: allocation {:?} was not created yet", function!(), alloc);
-                        continue;
-                    };
-
-                    let rect = gpu::Rect {
-                       ...
-                    };
-
-                    //let _ = wdk::wdm::ke_delay_execution_thread(wdk::wdm::NtTime::relative_ms(10));
-                    let _ = self.chan.resource_flush(res_id, rect).inspect_err(|e|
-                        error!("{}: failed to flush resource: {:?}", function!(), e)
-                    );
-                }
-                */
+                scanouts[i] = Some(PHYSICAL_ADDRESS { QuadPart: addr as _ });
+                old_scanouts = true;
                 continue;
             };
 
-            //self.addrs[i].0.store(addr, Ordering::Release);
             self.addrs[i].store(addr, Ordering::Release);
-            scanouts[i] = Some(PHYSICAL_ADDRESS { QuadPart: addr as i64 });
-
-            let Some(alloc) = weak.upgrade() else {
-                error!("{}: allocation no longer exists: strong {}, weak {}", function!(), weak.strong_count(), weak.weak_count());
-                continue;
-            };
 
             let Some(res_id) = alloc.id() else {
                 error!("{}: allocation {:?} was not created yet", function!(), alloc);
@@ -1066,19 +1036,7 @@ impl FlipTimerContext {
             };
 
             trace!("{}: alloc id {:?}: strong: {}, weak: {}", function!(), alloc.id(), Arc::strong_count(&alloc), Arc::weak_count(&alloc));
-
-            /*
-            let prev = self.addrs[i].1.swap(weak.into_raw() as *mut _, Ordering::SeqCst);
-            if !prev.is_null() {
-                drop(unsafe { Weak::from_raw(prev) });
-            }
-            */
-
             trace!("{}: scanout {}: vsync {:x} for alloc {}", function!(), i, addr, res_id);
-            //warn!("{}: vsync {:x} for alloc {:?}", function!(), addr, alloc);
-            //alloc.debug_print_attached_pages(self.chan.dxgk_interface());
-
-            //let _ = wdk::wdm::ke_delay_execution_thread(wdk::wdm::NtTime::relative_ms(10));
 
             let rect = match alloc.resource() {
                 VirtioResource::_3D { width, height, .. } => {
@@ -1101,6 +1059,10 @@ impl FlipTimerContext {
                         continue;
                     };
 
+                    if layout.modifier != 0 {
+                        error!("{}: blob is not linear: {:?}", function!(), alloc);
+                    }
+
                     let rect = gpu::Rect {
                         x: 0,
                         y: 0,
@@ -1116,20 +1078,30 @@ impl FlipTimerContext {
                 },
             };
 
-            let _ = self.chan.resource_flush(res_id, rect).inspect_err(|e|
+            //let _ = self.chan.resource_flush(res_id, rect).inspect_err(|e|
+            //    error!("{}: failed to flush resource: {:?}", function!(), e)
+            //);
+            //scanouts[i] = Some(PHYSICAL_ADDRESS { QuadPart: addr as _ });
+            //old_scanouts = true;
+
+            let _ = self.chan.resource_flush_and_vsync(res_id, rect, i as _, addr).inspect_err(|e|
                 error!("{}: failed to flush resource: {:?}", function!(), e)
             );
 
             scanout_sent = true;
         }
 
-        let vsync_enabled = self.vsync_enabled.load(Ordering::SeqCst);
-        //info!("{}: vsync {:x} for alloc {}", function!(), Interrupt::VSync(scanouts));
-        if vsync_enabled {
-            let _ = self.chan.dxgk_interface().notify_interrupt_synchronized(Interrupt::VSync(scanouts)).inspect_err(|e|
-                error!("{}: failed to notify about vsync: {:?}", function!(), e)
-            );
+        if old_scanouts && self.vsync_enabled.load(Ordering::SeqCst) {
+            self.chan.submit_vsync(scanouts);
         }
+
+        ////info!("{}: vsync {:x} for alloc {}", function!(), Interrupt::VSync(scanouts));
+        //let vsync_enabled = self.vsync_enabled.load(Ordering::SeqCst)
+        //if vsync_enabled {
+        //    let _ = self.chan.dxgk_interface().notify_interrupt_synchronized(Interrupt::VSync(scanouts)).inspect_err(|e|
+        //        error!("{}: failed to notify about vsync: {:?}", function!(), e)
+        //    );
+        //}
 
         if scanout_sent {
             self.chan.kick();
@@ -1572,7 +1544,7 @@ pub struct VidPnOutput {
     pub edid: Box<gpu::Edid>,
     pub current_mode: Option<usize>,
     pub modes: Vec<MonitorMode>,
-    pub flipq: Arc<ArrayQueue<(Weak<Allocation>, u64)>>,
+    pub flipq: Arc<ArrayQueue<(Arc<Allocation>, u64)>>,
     // TODO: FAST_MUTEX
     pub cursor: mutex::SpinMutex<Option<Cursor>>,
     // pub framebuffer: Option<(NonZero<u32>, Box<[u8]>)>, // res_id, buf

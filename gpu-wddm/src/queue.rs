@@ -107,7 +107,10 @@ use wdk::{
     },
     select,
     wdm_call_status,
-    dxgkrnl::DXGKRNL_INTERFACE,
+    dxgkrnl::{
+        DXGKRNL_INTERFACE,
+        PHYSICAL_ADDRESS,
+    },
     spin::{
         RwLock,
         SpinMutex,
@@ -326,6 +329,7 @@ enum Callback<const MAX_INLINE: usize> {
     DmaCompletedWithAllocations(Engine, u32, AllocationsBatch),
     DmaCompletedBatched(Engine, u32, Arc<AllocationsBatch>),
     DmaCompletedHwQueue(Arc<HwQueue>, u64),
+    VSyncCompleted(u32, u64),
     //AsyncCallback(dyn FnOnce() -> ()),
     // Async(...),
 }
@@ -1119,6 +1123,12 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
 
                 self.mark_free(i);
             },
+
+            Callback::VSyncCompleted(scanout, addr) => {
+                chan.data.notify_vsync_completed(scanout, addr);
+
+                self.mark_free(i);
+            },
         };
 
         Ok(Some(()))
@@ -1438,12 +1448,13 @@ impl From<transport::InterruptStatus> for InterruptStatus {
 struct GpuData {
     pub interface: DxgkInterface,
     pub shmem: VirtioCapabilityInfo,
+    pub flips_submitted: [AtomicU64; 16],
+    pub flips_completed: [AtomicU64; 16],
 
     resource_id: SimpleIdAllocator,
     context_id: SimpleIdAllocator,
     offset_allocator: SpinMutex<offset_allocator::Allocator>,
     irq_status: AtomicU32,
-    //fence: CachePadded<AtomicU64>,
     fence: FenceTracker,
 
     // TODO: FAST_MUTEX
@@ -1459,11 +1470,12 @@ impl GpuData {
         init!(Self {
             interface,
             shmem,
+            flips_submitted <- init_array_from_fn(|_| AtomicU64::new(0)),
+            flips_completed <- init_array_from_fn(|_| AtomicU64::new(0)),
             resource_id: SimpleIdAllocator::new(1),
             context_id: SimpleIdAllocator::new(1),
             offset_allocator: SpinMutex::new(offset_allocator::Allocator::with_max_allocs(shmem_pages, 1024 * 1024)),
             fence: FenceTracker::new(),
-            //fence: CachePadded::new(AtomicU64::new(0)),
             irq_status: AtomicU32::new(0),
             engines <- init_array_from_fn(|_| EngineState {
                 last_submitted_fence: AtomicU32::new(0),
@@ -1483,6 +1495,14 @@ impl GpuData {
         let _ = hw_queue.signal_progress_fence_value(fence).inspect_err(|e|
             error!("{}: failed to notify hw queue: {:?}", function!(), e)
         );
+    }
+
+    fn notify_vsync_completed(&self, scanout: u32, addr: u64) {
+        let _ = self.interface.notify_interrupt_synchronized(Interrupt::VSyncCompleted(addr, scanout)).inspect_err(|e|
+            error!("{}: failed to notify vsync completed: {:?}", function!(), e)
+        );
+        let submitted = self.flips_submitted[scanout as usize].load(Ordering::Acquire);
+        self.flips_completed[scanout as usize].store(submitted, Ordering::Release);
     }
 
     /*
@@ -1607,7 +1627,6 @@ impl GpuData {
                    break;
                };
                if let Some(context) = context.upgrade() {
-                   context.suspend(suspend_fence);
                    context.notify_context_suspended();
                } else {
                    warn!("{}: stale context suspended", function!());
@@ -1714,6 +1733,12 @@ impl GpuChannel {
         let irq = InterruptStatus::SCANOUT_QUEUE;
         self.data.irq_status.fetch_or(irq.bits(), Ordering::SeqCst);
         self.data.interface.queue_dpc();
+    }
+
+    pub fn flips_pending(&self, scanout: u32) -> bool {
+        let submitted = self.data.flips_submitted[scanout as usize].load(Ordering::Acquire);
+        let completed = self.data.flips_completed[scanout as usize].load(Ordering::Acquire);
+        completed != submitted
     }
 
     pub fn new_header(&self, hdr_type: gpu::Command, fence: bool, context: Option<NonZero<u32>>, ring: Option<u8>) -> gpu::CtrlHeader {
@@ -2050,6 +2075,30 @@ impl GpuChannel {
         Ok(())
     }
 
+    pub fn resource_flush_and_vsync(&self, id: NonZero<u32>, rect: gpu::Rect, scanout_id: u32, addr: u64) -> Result<(), NtStatus> {
+        let cmd = gpu::ResourceFlush {
+            header: self.new_header(gpu::Command::RESOURCE_FLUSH, false, None, None),
+            resource_id: id.get(),
+            rect,
+            _padding: 0,
+        };
+
+        let completed = self.data.flips_completed[scanout_id as usize].load(Ordering::Acquire);
+        let submitted = self.data.flips_submitted[scanout_id as usize].fetch_add(1, Ordering::AcqRel);
+
+        if submitted != completed {
+            warn!("{}: flips queued: completed {} / submitted {}", function!(), completed, submitted);
+        }
+
+        match self.control.request_async::<_, gpu::CtrlHeader>(cmd, Callback::VSyncCompleted(scanout_id, addr)) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.data.flips_completed[scanout_id as usize].store(submitted, Ordering::Release);
+                Err(e)
+            },
+        }
+    }
+
     pub fn resource_detach_backing(&self, id: NonZero<u32>) -> Result<(), NtStatus> {
         let cmd = gpu::ResourceDetachBacking {
             header: self.new_header(gpu::Command::RESOURCE_DETACH_BACKING, true, None, None),
@@ -2092,13 +2141,19 @@ impl GpuChannel {
 
         let input = MaybeInlineBuffer::Dma { data: dma };
         let output = MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?;
+
         //let output = if cmd.id == CommandId::MapBlob {
         //    MaybeInlineBuffer::try_new_zeroed::<gpu::RespMapInfo>()?
         //} else {
         //    MaybeInlineBuffer::try_new_zeroed::<gpu::CtrlHeader>()?
         //};
 
-        self.control.request_blocking_buf(input, output, DEFAULT_BLOCKING_TIMEOUT, self)?;
+        let output = self.control.request_blocking_buf(input, output, DEFAULT_BLOCKING_TIMEOUT, self)?;
+        let resp = gpu::CtrlHeader::read_from_prefix(output.as_ref()).map_err(|_| STATUS::IO_DEVICE_ERROR)?.0;
+
+        map_virtio_error!(resp.check_type(gpu::Command::OK_NODATA)).inspect_err(|_|
+            warn!("{}: failed to perform command: {:?}", function!(), resp)
+        )?;
 
         Ok(())
     }

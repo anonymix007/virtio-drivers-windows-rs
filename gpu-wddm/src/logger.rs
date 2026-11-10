@@ -163,7 +163,7 @@ pub unsafe fn force_flush() {
 
 impl Logger {
     fn try_flush(&self, entry: Option<LogEntry>) {
-        let mut uart = if let Some(entry) = entry {
+        let mut uart = if wdk::wdm::ke_get_current_irql() <= wdk::wdm::DISPATCH_LEVEL && let Some(entry) = entry {
             self.uart.lock()
         } else if let Some(uart) = self.uart.try_lock_timeout(10_000) {
             uart
