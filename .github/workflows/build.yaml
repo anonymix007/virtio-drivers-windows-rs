@@ -1,0 +1,259 @@
+name: Build driver package
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-kernel:
+    name: Build KMD
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v6
+
+      - name: Checkout EWDK headers and libs
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ vars.EWDK_REPO }}
+          token: ${{ secrets.EWDK_REPO_TOKEN }}
+          path: ewdk-private
+
+      - name: Install build dependencies
+        run: |
+          grep -rl azure.archive.ubuntu.com /etc/apt | xargs -r sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm pkg-config
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: nightly
+          components: rust-src
+          cache: true
+
+      - name: Setup EWDK env
+        run: |
+          EWDK_PRIVATE_REPO=$(realpath ewdk-private)
+          cat $EWDK_PRIVATE_REPO/vfs-overlay.json | sed "s#EWDK_PRIVATE_REPO#$EWDK_PRIVATE_REPO#g" > /tmp/vfs-overlay.json
+          cat $EWDK_PRIVATE_REPO/ewdk.env | sed "s#EWDK_PRIVATE_REPO#$EWDK_PRIVATE_REPO#g" > ./ewdk.env
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build KMD
+        run: |
+          cargo build --package virtio-gpu-wddm-rs
+
+      - name: Upload KMD
+        uses: actions/upload-artifact@v7
+        with:
+          name: kmd-debug
+          path: |
+            target/x86_64-pc-windows-msvc/debug/virtio_gpu_wddm_rs.dll
+            target/x86_64-pc-windows-msvc/debug/virtio_gpu_wddm_rs.pdb
+
+  build-user:
+    name: Build D3D11 UMD and Mesa
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Install build dependencies
+        background: true
+        run: |
+          grep -rl azure.archive.ubuntu.com /etc/apt | xargs -r sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm meson ninja-build mingw-w64 python3 python3-pip python3-mako python3-yaml pkg-config wine glslang-tools
+          x86_64-w64-mingw32-gcc --version
+
+      - name: Checkout EWDK headers and libs
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ vars.EWDK_REPO }}
+          token: ${{ secrets.EWDK_REPO_TOKEN }}
+          path: ewdk-private
+
+      - name: Checkout D3D11 UMD
+        uses: actions/checkout@v6
+        with:
+          repository: anonymix007/virtio-d3d11
+          path: virtio-d3d11
+          submodules: recursive
+
+      - name: Clone Mesa
+        run: |
+          git clone https://gitlab.freedesktop.org/anonymix007/mesa.git -b venus-win32 --depth=1
+
+      - name: Resolve Mesa commit hash
+        id: mesa-sha
+        run: |
+          echo "sha=$(git -C mesa rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve D3D11 UMD commit SHA
+        id: dx11um-sha
+        run: |
+          echo "sha=$(git -C virtio-d3d11 rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Mesa build
+        id: cache-mesa
+        uses: actions/cache@v6
+        with:
+          path: install/bin/*
+          key: mesa-${{ steps.mesa-sha.outputs.sha }}
+
+      - name: Cache D3D11 UMD build
+        id: cache-dx11um
+        uses: actions/cache@v6
+        with:
+          path: |
+            virtio-d3d11/build/dist/*
+            virtio-d3d11/build/*.dll
+          key: dx11um-${{ steps.dx11um-sha.outputs.sha }}
+
+      - name: Setup EWDK, download meson cross-file
+        run: |
+          EWDK_PRIVATE_REPO=$(realpath ewdk-private)
+          cat $EWDK_PRIVATE_REPO/vfs-overlay.json | sed "s#EWDK_PRIVATE_REPO#$EWDK_PRIVATE_REPO#g" > /tmp/vfs-overlay.json
+          cat $EWDK_PRIVATE_REPO/ewdk.env | sed "s#EWDK_PRIVATE_REPO#$EWDK_PRIVATE_REPO#g" > ./ewdk.env
+          wget https://raw.githubusercontent.com/mesonbuild/meson/refs/heads/master/cross/linux-mingw-w64-64bit.txt
+          source ewdk.env
+          mkdir -p winddk
+          cp -r $EWDK_PRIVATE_REPO/Include/$WINSDKVER/um/* winddk/
+          ln -s winddk/d3d12TokenizedProgramFormat.hpp winddk/d3d12tokenizedprogramformat.hpp
+          SHARED_HEADERS=(d3dkmddi.h d3dkmdt.h d3dkmthk.h d3dukmdt.h dxgiformat.h dxgitype.h)
+          for header in "${SHARED_HEADERS[@]}"; do
+            cp "$EWDK_PRIVATE_REPO/Include/$WINSDKVER/shared/$header" winddk/
+          done
+          cp "$EWDK_PRIVATE_REPO/Include/$WINSDKVER/km/wmidata.h" winddk/
+          mkdir -p install
+          mkdir -p out
+
+      - name: Wait for build deps
+        wait-all:
+
+      - name: Build Mesa
+        if: steps.cache-mesa.outputs.cache-hit != 'true'
+        background: true
+        run: |
+          cp -rv winddk/* mesa/include/winddk/
+          meson setup -Dvulkan-icd-dir=bin -Dgallium-drivers= -Dvulkan-drivers=virtio -Dopengl=false -Degl=disabled --prefix `realpath install` --cross-file=linux-mingw-w64-64bit.txt mesa/builddir mesa
+          meson compile -C mesa/builddir
+          meson install -C mesa/builddir
+          rm ./install/bin/libz-1.dll
+
+      - name: Build D3D11 UMD
+        if: steps.cache-dx11um.outputs.cache-hit != 'true'
+        background: true
+        run: |
+          cp -rv winddk/* virtio-d3d11/include/winddk/
+          make -C virtio-d3d11 -j`nproc`
+          cp virtio-d3d11/build/dist/* install/bin/
+          cp virtio-d3d11/build/dx11um_virtio.dll install/bin/dx11um_virtio-debug.dll
+
+      - name: Wait for D3D11 UMD and Mesa
+        wait-all:
+
+      - name: Copy D3D11 UMD and Mesa
+        run: |
+          cp install/bin/* out/
+          cp virtio-d3d11/build/dist/* out/
+          cp virtio-d3d11/build/dx11um_virtio.dll out/dx11um_virtio-debug.dll
+
+      - name: Upload D3D11 UMD and Mesa
+        uses: actions/upload-artifact@v7
+        with:
+          name: umd-debug
+          path: out/*
+
+  dist:
+    name: Package and test sign
+    needs: [build-kernel, build-user]
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        background: true
+        run: |
+          grep -rl azure.archive.ubuntu.com /etc/apt | xargs -r sudo sed -i 's/azure\.archive\.ubuntu\.com/archive.ubuntu.com/g'
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64 openssl osslsigncode
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: nightly
+          cache: true
+
+      - name: Install makecat
+        background: true
+        run: cargo install --git https://github.com/anonymix007/makecat
+
+      - name: Install cbindgen
+        background: true
+        run: cargo install cbindgen
+
+      - name: Download KMD
+        background: true
+        uses: actions/download-artifact@v8
+        with:
+          name: kmd-debug
+          path: kmd
+
+      - name: Download D3D11 UMD and Mesa
+        background: true
+        uses: actions/download-artifact@v8
+        with:
+          name: umd-debug
+          path: umd
+
+      - name: Wait for build deps
+        wait-all:
+
+      - name: Setup cert.env
+        run: |
+          CERT_PATH=$(realpath .ci)
+          cat > cert.env <<EOF
+          #!/bin/bash
+          export CERT="$CERT_PATH/VirtIOTestCert.cer"
+          export KEY="$CERT_PATH/VirtIOTestCert.pfx"
+          EOF
+
+      - name: Package and sign
+        run: |
+          mkdir -p target/mesa
+          mkdir -p target/symbols
+          mkdir -p target/x86_64-pc-windows-msvc/debug
+          cp umd/vulkan_*.dll target/symbols/
+          mv kmd/*.pdb target/symbols/
+          cp umd/* target/mesa/
+          cp kmd/* target/x86_64-pc-windows-msvc/debug/
+          for debug in target/mesa/*-debug.dll; do
+            base=$(basename $debug)
+            sym=target/symbols/${base%-debug.*}.dll
+            mv $debug $sym
+          done
+          ./dist.sh --no-build
+          mv target/dist/*.debug target/symbols/
+
+      - name: Upload driver package
+        uses: actions/upload-artifact@v7
+        with:
+          name: driver-package
+          path: |
+            target/dist/*
+          if-no-files-found: warn
+
+      - name: Upload debug symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-symbols
+          path: |
+            target/symbols/*
+          if-no-files-found: warn
