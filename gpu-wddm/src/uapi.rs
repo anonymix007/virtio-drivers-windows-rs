@@ -504,7 +504,11 @@ pub struct ExecBuffer {
 
 impl ExecBuffer {
     pub fn command_slice(&self, priv_size: usize) -> &[u8] {
-        slice_from_raw_parts(self.cmd.as_ptr(), priv_size - core::mem::size_of::<ExecBuffer>())
+        if core::mem::size_of::<ExecBuffer>() <= priv_size {
+            slice_from_raw_parts(self.cmd.as_ptr(), priv_size - core::mem::size_of::<ExecBuffer>())
+        } else {
+            &[]
+        }
     }
 }
 
@@ -551,7 +555,11 @@ pub struct CreateResource {
 
 impl CreateResource {
     pub fn command_slice(&self, priv_size: usize) -> &[u8] {
-        slice_from_raw_parts(self.cmd.as_ptr(), priv_size - core::mem::size_of::<CreateResource>())
+        if core::mem::size_of::<CreateResource>() <= priv_size {
+            slice_from_raw_parts(self.cmd.as_ptr(), priv_size - core::mem::size_of::<CreateResource>())
+        } else {
+            &[]
+        }
     }
 }
 
@@ -1017,7 +1025,11 @@ pub struct SubmitCommand {
 
 impl SubmitCommand {
     pub fn command_slice(&self, priv_size: usize) -> &[u8] {
-        slice_from_raw_parts(self.cmd.as_ptr(), priv_size - core::mem::size_of::<SubmitCommand>())
+        if core::mem::size_of::<SubmitCommand>() <= priv_size {
+            slice_from_raw_parts(self.cmd.as_ptr(), priv_size - core::mem::size_of::<SubmitCommand>())
+        } else {
+            &[]
+        }
     }
 }
 
