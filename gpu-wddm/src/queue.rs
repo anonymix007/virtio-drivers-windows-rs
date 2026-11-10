@@ -2471,7 +2471,6 @@ pub struct QueueHandler {
     pci_transport: PciTransport,
     control: ControlQueue,
     cursor: CursorQueue,
-    data: Arc<GpuData>,
     pub chan: GpuChannel,
     // TODO: bad name. Maybe scheduler thread?
     thread: Pin<Box<Thread>>,
@@ -2490,44 +2489,41 @@ impl QueueHandler {
         let event_idx = negotiated_features.contains(gpu::Features::RING_EVENT_IDX);
 
         init_scope(move || {
+            let data = Arc::try_init(GpuData::new(interface, shmem))?;
+
             Ok(init!(Self {
                 control <- ControlQueue::new(&mut pci_transport, access_platform, indirect, event_idx),
                 cursor <- CursorQueue::new(&mut pci_transport, access_platform, indirect, event_idx),
                 pci_transport: pci_transport,
                 thread: Box::try_pin_init(Thread::new())?,
-                data: Arc::try_init(GpuData::new(interface, shmem))?,
                 chan: GpuChannel {
                     control: control.chan.clone(),
                     cursor: cursor.chan.clone(),
-                    data: data.clone(),
+                    data,
                 },
             }? NtStatus))
         })
     }
 
     pub fn channel(&self) -> GpuChannel {
-        GpuChannel {
-            control: self.control.chan.clone(),
-            cursor: self.cursor.chan.clone(),
-            data: self.data.clone(),
-        }
+        self.chan.clone()
     }
 
     pub fn dxgk_interface(&self) -> &DxgkInterface {
-        &self.data.interface
+        &self.chan.data.interface
     }
 
     pub fn check_engine(&self, engine: Engine) -> bool {
-        self.data.engines[engine.node_ordinal() as usize].is_responsive()
+        self.chan.data.engines[engine.node_ordinal() as usize].is_responsive()
     }
 
     pub fn last_completed_fence(&self, engine: Engine) -> u32 {
-        self.data.engines[engine.node_ordinal() as usize].last_completed_fence.load(Ordering::SeqCst)
-        //self.data.engines[engine.node_ordinal() as usize].completed_queue.current.load(Ordering::SeqCst) as _
+        self.chan.data.engines[engine.node_ordinal() as usize].last_completed_fence.load(Ordering::SeqCst)
+        //self.chan.data.engines[engine.node_ordinal() as usize].completed_queue.current.load(Ordering::SeqCst) as _
     }
 
     pub fn last_submitted_fence(&self, engine: Engine) -> u32 {
-        self.data.engines[engine.node_ordinal() as usize].last_submitted_fence.load(Ordering::SeqCst)
+        self.chan.data.engines[engine.node_ordinal() as usize].last_submitted_fence.load(Ordering::SeqCst)
     }
 
     fn handler_thread_routine(&mut self) {
@@ -2634,11 +2630,11 @@ impl Drop for QueueHandler {
         trace!("{}", function!());
         self.thread.stop();
 
-        //for res_id in self.data.resource_id.free.lock().iter() {
+        //for res_id in self.chan.data.resource_id.free.lock().iter() {
         //    warn!("{}: used resource id: {}", function!(), res_id);
         //}
         //
-        //for ctx_id in self.data.context_id.free.lock().iter() {
+        //for ctx_id in self.chan.data.context_id.free.lock().iter() {
         //    warn!("{}: used context id: {}", function!(), ctx_id);
         //}
 
