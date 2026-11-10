@@ -519,7 +519,7 @@ impl DxgkInterface {
         Ok(())
     }
 
-    fn queue_dpc(&self) -> bool {
+    pub fn queue_dpc(&self) -> bool {
         dxgk_call!(<= PROFILE_LEVEL | self.DxgkCbQueueDpc()) != 0
     }
 
@@ -2029,7 +2029,7 @@ impl Adapter {
             return;
         };
 
-        state.queue_handler.handle_dpc();
+        state.queue_handler.handle_dpc(&state.outputs);
         state.queue_handler.dxgk_interface().notify_dpc();
     }
 

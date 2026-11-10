@@ -55,6 +55,7 @@ use alloc::{
 };
 
 //use offset_allocator;
+use bitflags::bitflags;
 use smallvec::SmallVec;
 use pin_init::*;
 use zerocopy::*;
@@ -71,8 +72,8 @@ use virtio_drivers::{
         },
         DeviceType,
         Transport,
-        InterruptStatus,
     },
+    transport,
     queue::*,
     BufferDirection,
     Hal,
@@ -84,6 +85,7 @@ use crate::uapi::*;
 use crate::allocation::*;
 use crate::command::{*, Command};
 use crate::device::{Context, HwQueue};
+use crate::vidpn::VidPnOutput;
 
 use crate::map_virtio_error;
 use crate::function;
@@ -99,6 +101,7 @@ use wdk::{
         NTSTATUS,
         io_get_remaining_stack_size,
         ke_query_performance_counter,
+        ke_get_current_irql,
         IrqlGuard,
         DISPATCH_LEVEL,
     },
@@ -666,8 +669,7 @@ impl<const IN: usize, const OUT: usize> QueueChannel<IN, OUT> {
     }
 
     pub fn request_async_buf(&self, input: MaybeInlineBuffer<IN>, output: MaybeInlineBuffer<OUT>, callback: Callback<OUT>) -> Result<(), NtStatus> {
-        self.0.push(Buffer { input, output, callback });
-        Ok(())
+        Ok(self.0.push(Buffer { input, output, callback }))
     }
 
     pub fn request_async_into_buf<Req: IntoBytes + Immutable + KnownLayout>(&self, req: Req, output: MaybeInlineBuffer<OUT>, callback: Callback<OUT>) -> Result<(), NtStatus> {
@@ -741,8 +743,7 @@ impl<const IN: usize, const OUT: usize> QueueChannel<IN, OUT> {
         let output = MaybeInlineBuffer::try_new_zeroed::<Rsp>()?;
         let callback = Callback::DmaCompletedBatched(engine, fence, allocations);
 
-        self.0.push(Buffer { input, output, callback });
-        Ok(())
+        Ok(self.0.push(Buffer { input, output, callback }))
     }
 
     pub fn pop_queued_request(&self) -> Option<Buffer<IN, OUT>> {
@@ -1405,6 +1406,35 @@ impl FenceSubmission {
     }
 }
 
+bitflags! {
+    #[repr(transparent)]
+    #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+    struct InterruptStatus: u32 {
+        const CONTROL_IRQ   = 1u32 << 0;
+        const CURSOR_IRQ    = 1u32 << 1;
+        const CONFIG_CHANGE = 1u32 << 2;
+        const SCANOUT_QUEUE = 1u32 << 3;
+        const CONTROL_REQ   = 1u32 << 4;
+        const CURSOR_REQ    = 1u32 << 5;
+    }
+}
+
+impl From<transport::InterruptStatus> for InterruptStatus {
+    fn from(val: transport::InterruptStatus) -> Self {
+        let mut status = InterruptStatus::empty();
+
+        if val.contains(transport::InterruptStatus::QUEUE_INTERRUPT) {
+            status |= InterruptStatus::CONTROL_IRQ | InterruptStatus::CURSOR_IRQ;
+        }
+
+        if val.contains(transport::InterruptStatus::DEVICE_CONFIGURATION_INTERRUPT) {
+            status |= InterruptStatus::CONFIG_CHANGE;
+        }
+
+        status
+    }
+}
+
 struct GpuData {
     pub interface: DxgkInterface,
     pub shmem: VirtioCapabilityInfo,
@@ -1412,7 +1442,7 @@ struct GpuData {
     resource_id: SimpleIdAllocator,
     context_id: SimpleIdAllocator,
     offset_allocator: SpinMutex<offset_allocator::Allocator>,
-    irq: AtomicU32,
+    irq_status: AtomicU32,
     //fence: CachePadded<AtomicU64>,
     fence: FenceTracker,
 
@@ -1434,7 +1464,7 @@ impl GpuData {
             offset_allocator: SpinMutex::new(offset_allocator::Allocator::with_max_allocs(shmem_pages, 1024 * 1024)),
             fence: FenceTracker::new(),
             //fence: CachePadded::new(AtomicU64::new(0)),
-            irq: AtomicU32::new(0),
+            irq_status: AtomicU32::new(0),
             engines <- init_array_from_fn(|_| EngineState {
                 last_submitted_fence: AtomicU32::new(0),
                 last_completed_fence: AtomicU32::new(0),
@@ -1672,6 +1702,18 @@ impl GpuChannel {
     pub fn kick(&self) {
         self.control.get_queue_event().set();
         self.cursor.get_queue_event().set();
+    }
+
+    pub fn queue_kick(&self) {
+        let irq = InterruptStatus::CONTROL_REQ | InterruptStatus::CURSOR_REQ;
+        self.data.irq_status.fetch_or(irq.bits(), Ordering::SeqCst);
+        self.data.interface.queue_dpc();
+    }
+
+    pub fn queue_scanout(&self) {
+        let irq = InterruptStatus::SCANOUT_QUEUE;
+        self.data.irq_status.fetch_or(irq.bits(), Ordering::SeqCst);
+        self.data.interface.queue_dpc();
     }
 
     pub fn new_header(&self, hdr_type: gpu::Command, fence: bool, context: Option<NonZero<u32>>, ring: Option<u8>) -> gpu::CtrlHeader {
@@ -2450,8 +2492,8 @@ impl QueueHandler {
     }
 
     pub fn ack_interrupt(&mut self) {
-        let irq = self.pci_transport.ack_interrupt();
-        self.data.irq.fetch_or(irq.bits(), Ordering::SeqCst);
+        let irq: InterruptStatus = self.pci_transport.ack_interrupt().into();
+        self.chan.data.irq_status.fetch_or(irq.bits(), Ordering::SeqCst);
     }
 
     pub fn kick(&self) {
@@ -2461,20 +2503,64 @@ impl QueueHandler {
         self.thread.events().config_irq.set();
     }
 
-    pub fn handle_dpc(&self) {
-        let irq = InterruptStatus::from_bits_truncate(self.data.irq.swap(0, Ordering::SeqCst));
+    pub fn handle_dpc(&self, outputs: &[Option<VidPnOutput>; 16]) {
+        let irq = InterruptStatus::from_bits_truncate(self.chan.data.irq_status.swap(0, Ordering::SeqCst));
 
-        if irq.contains(InterruptStatus::QUEUE_INTERRUPT) {
+        if irq.contains(InterruptStatus::CONTROL_IRQ) {
             self.thread.events().control_irq.set();
+        }
+
+        if irq.contains(InterruptStatus::CURSOR_IRQ) {
             self.thread.events().cursor_irq.set();
         }
-        if irq.contains(InterruptStatus::DEVICE_CONFIGURATION_INTERRUPT) {
+
+        if irq.contains(InterruptStatus::CONFIG_CHANGE) {
             self.thread.events().config_irq.set();
         }
+
+        if irq.contains(InterruptStatus::CONTROL_REQ) {
+            self.chan.control.get_queue_event().set();
+        }
+
+        if irq.contains(InterruptStatus::CURSOR_REQ) {
+            self.chan.cursor.get_queue_event().set();
+        }
+
+        /*
+        if irq.contains(InterruptStatus::SCANOUT_QUEUE) {
+            let mut scanouts_sent = false;
+
+            for (scanout, output) in outputs.iter().enumerate() {
+                let Some(output) = output.as_ref() else {
+                    continue;
+                };
+
+                let Some((alloc, addr)) = output.flipq.pop() else {
+                    continue;
+                };
+
+                let _ = VidPnOutput::scanout(scanout as u32, &self.chan, &alloc, addr).inspect_err(|e|
+                    error!("{}: failed to queue scanout: {:?}", function!(), e)
+                );
+
+                scanouts_sent = true
+            }
+
+            if scanouts_sent {
+                self.kick();
+            } else {
+                warn!("{}: no deferred scanouts were handled", function!());
+            }
+
+            //let _ = VidPnOutput::scanout(scanout, &state.queue_handler.chan, alloc, addr).inspect_err(|e|
+            //    error!("{}: failed to queue scanout: {:?}", function!(), e)
+            //);
+        }
+        */
     }
 
     pub fn notify_dma_preempted(&self, engine: Engine, preemption_fence: u32, last_completed_fence: u32) {
-        self.data.notify_dma_preempted(engine, preemption_fence, last_completed_fence);
+        self.chan.data.notify_dma_preempted(engine, preemption_fence, last_completed_fence);
     }
 }
 
