@@ -15,6 +15,7 @@ use core::{
         atomic::{
             AtomicU32,
             AtomicU64,
+            AtomicI64,
             AtomicPtr,
             AtomicBool,
             AtomicUsize,
@@ -522,7 +523,7 @@ impl DxgkInterface {
     }
 
     pub fn queue_dpc(&self) -> bool {
-        dxgk_call!(<= PROFILE_LEVEL | self.DxgkCbQueueDpc()) != 0
+        dxgk_call_unchecked!(self.DxgkCbQueueDpc()) != 0
     }
 
     pub fn get_physical_bar_address(&self, bar: u8) -> Option<PhysAddr> {
@@ -1413,7 +1414,6 @@ impl Adapter {
         //let addrs = [const { (AtomicU64::new(0), AtomicPtr::new(null_mut())) }; 16];
 
         let mut system_display_resolution = None;
-
         for scanout in 0..(num_scanouts as usize) {
             let edid = chan.get_edid(scanout as _)?;
             let preferred_resolution = map_virtio_error!(edid.preferred_resolution())?;
@@ -1451,11 +1451,12 @@ impl Adapter {
         // DEBUG => false
         //if false {
         if true {
-
         let flip_timer = FlipTimer::try_new(FlipTimerContext {
             addrs,
+            num_scanouts,
             flipq,
             vsync_enabled,
+            vsync_timestamp: AtomicI64::new(0),
             chan,
         }).inspect_err(|e|
             error!("{}: failed to create flip timer: {:?}", function!(), e)
@@ -3058,10 +3059,20 @@ impl Adapter {
         let targets = self.targets_for_source(source)?;
 
         for &scanout in targets {
+            //state.outputs[scanout as usize].as_ref().unwrap().
+            //assert!(state.outputs[scanout as usize].is_some());
+            //self.flip_timer.as_ref().unwrap().inner.addrs[scanout as usize].store(addr, Ordering::Release);
+            // We cannot "program scanout registers" here, so queue scanouts and perform that in DPC
+            //let _ = VidPnOutput::scanout(scanout, &state.queue_handler.chan, alloc, addr).inspect_err(|e|
+            //    error!("{}: failed to queue scanout: {:?}", function!(), e)
+            //);
+
             if let Some((dropped_addr, dropped_alloc)) = state.outputs[scanout as usize].as_ref().unwrap().flipq.force_push((alloc.clone(), addr)) {
                 warn!("{}: dropped scanout: {:?}", function!(), dropped_alloc);
             }
         }
+
+        //state.queue_handler.chan.queue_scanout();
 
         Ok(())
     }

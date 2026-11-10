@@ -1501,8 +1501,10 @@ impl GpuData {
         let _ = self.interface.notify_interrupt_synchronized(Interrupt::VSyncCompleted(addr, scanout)).inspect_err(|e|
             error!("{}: failed to notify vsync completed: {:?}", function!(), e)
         );
+
         let submitted = self.flips_submitted[scanout as usize].load(Ordering::Acquire);
-        self.flips_completed[scanout as usize].store(submitted, Ordering::Release);
+        //warn!("{}: scanout {}: vsync {} completed at {}", function!(), scanout, submitted, ke_query_performance_counter().0);
+        self.flips_completed[scanout as usize].fetch_max(submitted, Ordering::AcqRel);
     }
 
     /*
@@ -1666,25 +1668,12 @@ impl GpuData {
         });
 
         self.fence_submissions.lock().extend(resubmit);
+    }
 
-        /*
-        if self.fence_submissions.lock().len() > 0 || self.fence.unsignaled.read().len() > 0 {
-            for (i, state) in self.engines.iter().enumerate() {
-                let engine = Engine::try_from_node_ordinal(i as _).unwrap();
-                if !state.is_responsive() {
-                    let (now, freq) = ke_query_performance_counter();
-                    warn!("{}: Engine {:?} is not responsive: {:?}, now: {}, dt: {}, threshold: {}", function!(), engine, state, now, now - state.last_submitted_timestamp.load(Ordering::SeqCst), EngineState::RESPONSIVE_TIMEOUT_SEC * freq);
-                }
-            }
-        }
-        */
-
-        //let pending = self.fence_submissions.lock();
-        //let unsignaled = &self.fence.0.read().unsignaled;
-        //if pending.len() > 0 || unsignaled.len() > 0 {
-        //    warn!("{}: pending: {:?}", function!(), pending);
-        //    warn!("{}: unsignaled: {:?}", function!(), unsignaled);
-        //}
+    fn flips_pending(&self, scanout: u32) -> bool {
+        let submitted = self.flips_submitted[scanout as usize].load(Ordering::Acquire);
+        let completed = self.flips_completed[scanout as usize].load(Ordering::Acquire);
+        completed != submitted
     }
 }
 
@@ -1736,9 +1725,7 @@ impl GpuChannel {
     }
 
     pub fn flips_pending(&self, scanout: u32) -> bool {
-        let submitted = self.data.flips_submitted[scanout as usize].load(Ordering::Acquire);
-        let completed = self.data.flips_completed[scanout as usize].load(Ordering::Acquire);
-        completed != submitted
+        self.data.flips_pending(scanout)
     }
 
     pub fn new_header(&self, hdr_type: gpu::Command, fence: bool, context: Option<NonZero<u32>>, ring: Option<u8>) -> gpu::CtrlHeader {
@@ -2063,6 +2050,7 @@ impl GpuChannel {
         Ok(())
     }
 
+    /*
     pub fn resource_flush(&self, id: NonZero<u32>, rect: gpu::Rect) -> Result<(), NtStatus> {
         let cmd = gpu::ResourceFlush {
             header: self.new_header(gpu::Command::RESOURCE_FLUSH, false, None, None),
@@ -2074,6 +2062,7 @@ impl GpuChannel {
 
         Ok(())
     }
+    */
 
     pub fn resource_flush_and_vsync(&self, id: NonZero<u32>, rect: gpu::Rect, scanout_id: u32, addr: u64) -> Result<(), NtStatus> {
         let cmd = gpu::ResourceFlush {
@@ -2093,7 +2082,7 @@ impl GpuChannel {
         match self.control.request_async::<_, gpu::CtrlHeader>(cmd, Callback::VSyncCompleted(scanout_id, addr)) {
             Ok(()) => Ok(()),
             Err(e) => {
-                self.data.flips_completed[scanout_id as usize].store(submitted, Ordering::Release);
+                self.data.flips_completed[scanout_id as usize].fetch_max(submitted, Ordering::AcqRel);
                 Err(e)
             },
         }
@@ -2497,7 +2486,7 @@ impl QueueHandler {
                 },
                 cursor_msg => {
                     //trace!("- new cursor request");
-                    self.cursor.handle_responses(&chan);
+                    self.cursor.handle_requests(&mut self.pci_transport);
                 },
                 events.config_irq => {
                     // TODO
@@ -2527,7 +2516,6 @@ impl QueueHandler {
                 let engine = Engine::try_from_node_ordinal(node_ordinal).unwrap();
                 chan.data.notify_queued_fences(engine);
             }
-
             //trace!("- waiting for next message");
         }
     }

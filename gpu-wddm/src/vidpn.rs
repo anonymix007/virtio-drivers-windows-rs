@@ -9,6 +9,7 @@ use core::{
         DerefMut,
     },
     sync::atomic::{
+        AtomicI64,
         AtomicU64,
         AtomicPtr,
         AtomicBool,
@@ -996,112 +997,55 @@ impl MonitorMode {
     }
 }
 
+const FPS: u8 = 60;
+
 pub struct FlipTimerContext {
     pub addrs: [AtomicU64; 16],
     //pub addrs: [(AtomicU64, AtomicPtr<Allocation>); 16],
     pub flipq: [Option<Arc<ArrayQueue<(Arc<Allocation>, u64)>>>; 16],
+    pub num_scanouts: u8,
     pub vsync_enabled: AtomicBool,
+    pub vsync_timestamp: AtomicI64,
     pub chan: GpuChannel,
 }
 
 unsafe impl Send for FlipTimerContext {}
 
 impl FlipTimerContext {
+    fn has_scanout(&self, scanout: usize) -> bool {
+        scanout < self.num_scanouts as usize
+    }
+
     fn flip(&self) {
         let mut scanouts = [None; 16];
         let mut scanout_sent = false;
-        let mut old_scanouts = false;
 
-        for (i, q) in self.flipq.iter().enumerate() {
-            let Some(q) = q else {
+        for i in 0..self.num_scanouts as usize {
+            let Some(q) = self.flipq[i].as_ref() else {
                 continue;
             };
 
-            if self.chan.flips_pending(i as u32) {
-                continue;
-            }
-
             let Some((alloc, addr)) = q.pop() else {
-                let addr = self.addrs[i].load(Ordering::Acquire);
-                scanouts[i] = Some(PHYSICAL_ADDRESS { QuadPart: addr as _ });
-                old_scanouts = true;
+                if !self.chan.flips_pending(i as _) {
+                    scanouts[i] = Some(PHYSICAL_ADDRESS { QuadPart: self.addrs[i].load(Ordering::Acquire) as _ });
+                }
                 continue;
             };
 
             self.addrs[i].store(addr, Ordering::Release);
 
-            let Some(res_id) = alloc.id() else {
-                error!("{}: allocation {:?} was not created yet", function!(), alloc);
-                continue;
-            };
-
             trace!("{}: alloc id {:?}: strong: {}, weak: {}", function!(), alloc.id(), Arc::strong_count(&alloc), Arc::weak_count(&alloc));
-            trace!("{}: scanout {}: vsync {:x} for alloc {}", function!(), i, addr, res_id);
+            trace!("{}: scanout {}: vsync {:x} for alloc {:?}", function!(), i, addr, alloc.id());
 
-            let rect = match alloc.resource() {
-                VirtioResource::_3D { width, height, .. } => {
-                    let rect = gpu::Rect {
-                        x: 0,
-                        y: 0,
-                        width: *width,
-                        height: *height,
-                    };
-
-                    let _ = self.chan.set_scanout(rect, i as u32, res_id).inspect_err(|e|
-                        error!("{}: failed to set scanout: {:?}", function!(), e)
-                    );
-
-                    rect
-                },
-                VirtioResource::Blob { layout, .. } => {
-                    let Some(layout) = *layout.read() else {
-                        error!("{}: allocation {:?} does not have blob layout yet", function!(), alloc);
-                        continue;
-                    };
-
-                    if layout.modifier != 0 {
-                        error!("{}: blob is not linear: {:?}", function!(), alloc);
-                    }
-
-                    let rect = gpu::Rect {
-                        x: 0,
-                        y: 0,
-                        width: layout.info.width,
-                        height: layout.info.height,
-                    };
-
-                    let _ = self.chan.set_scanout_blob(rect, i as u32, res_id, layout).inspect_err(|e|
-                        error!("{}: failed to set scanout: {:?}", function!(), e)
-                    );
-
-                    rect
-                },
-            };
-
-            //let _ = self.chan.resource_flush(res_id, rect).inspect_err(|e|
-            //    error!("{}: failed to flush resource: {:?}", function!(), e)
-            //);
-            //scanouts[i] = Some(PHYSICAL_ADDRESS { QuadPart: addr as _ });
-            //old_scanouts = true;
-
-            let _ = self.chan.resource_flush_and_vsync(res_id, rect, i as _, addr).inspect_err(|e|
-                error!("{}: failed to flush resource: {:?}", function!(), e)
-            );
-
+            let _ = VidPnOutput::scanout(i as _, &self.chan, &alloc, addr);
             scanout_sent = true;
         }
 
-        if old_scanouts && self.vsync_enabled.load(Ordering::SeqCst) {
-            self.chan.submit_vsync(scanouts);
+        if scanouts.iter().any(|addr| addr.is_some()) && self.vsync_enabled.load(Ordering::SeqCst) {
+            let _ = self.chan.dxgk_interface().notify_interrupt_synchronized(Interrupt::VSync(scanouts)).inspect_err(|e|
+                error!("{}: failed to notify about vsync: {:?}", function!(), e)
+            );
         }
-
-        ////info!("{}: vsync {:x} for alloc {}", function!(), Interrupt::VSync(scanouts));
-        //let vsync_enabled = self.vsync_enabled.load(Ordering::SeqCst)
-        //if vsync_enabled {
-        //    let _ = self.chan.dxgk_interface().notify_interrupt_synchronized(Interrupt::VSync(scanouts)).inspect_err(|e|
-        //        error!("{}: failed to notify about vsync: {:?}", function!(), e)
-        //    );
-        //}
 
         if scanout_sent {
             self.chan.kick();
@@ -1130,9 +1074,27 @@ pub struct FlipTimer {
 impl FlipTimer {
     pub fn try_new(data: FlipTimerContext) -> Result<Self, NtStatus> {
         let inner = Box::new(data);
-
-        let timer = ExTimer::new_hires(|context: &FlipTimerContext| {
+        let timer = ExTimer::new_hires(|timer: &ExTimer<FlipTimerContext>, context: &FlipTimerContext| {
             //trace!("{}: flip", function!());
+            let frame_dt = NtTime::fps(FPS).0.unwrap();
+
+            let (now_ts, freq) = ke_query_performance_counter();
+            let now = NtTime::performance_counter(now_ts, freq).0.unwrap();
+
+            let expected = context.vsync_timestamp.fetch_add(frame_dt as _, Ordering::AcqRel) as i64;
+            let delta = now - expected;
+
+            let timeout = if frame_dt - delta > 0 {
+                NtTime(Some(frame_dt - delta))
+            } else {
+                debug!("{}: timer missed too much, resyncing: now {}, delta {}", function!(), now, delta);
+                context.vsync_timestamp.store(now + frame_dt, Ordering::Release);
+
+                NtTime::fps(FPS)
+            };
+
+            let _ = timer.start_oneshot(timeout);
+
             context.flip();
         }, &*inner as *const _)?;
 
@@ -1143,10 +1105,17 @@ impl FlipTimer {
     }
 
     pub fn start(&self) -> Result<(), NtStatus> {
-        Ok(self.timer.start_periodic(NtTime::fps(60))?)
+        let timeout = NtTime::fps(FPS);
+
+        let (now_ts, freq) = ke_query_performance_counter();
+        let timestamp = NtTime::performance_counter(now_ts, freq).0.unwrap() + timeout.0.unwrap();
+
+        self.inner.vsync_timestamp.store(timestamp as _, Ordering::Release);
+        Ok(self.timer.start_periodic(timeout, true)?)
     }
 
     pub fn stop(&self) -> Result<(), NtStatus> {
+        self.inner.vsync_timestamp.store(0, Ordering::Release);
         self.timer.cancel();
         Ok(())
     }
@@ -1675,6 +1644,53 @@ impl VidPnOutput {
         }
         cursor.as_mut().unwrap().write_masked_color(masked_color, stride);
         cursor.as_ref().unwrap().transfer_and_update_async(chan, &self.async_cursor_transfer, scanout)
+    }
+
+    pub fn scanout(scanout: u32, chan: &GpuChannel, alloc: &Allocation, addr: u64) -> Result<(), NtStatus> {
+        let res_id = alloc.id().ok_or(STATUS::PENDING).inspect_err(|e|
+            error!("{}: allocation {:?} was not created yet", function!(), alloc)
+        )?;
+
+        let rect = match alloc.resource() {
+            VirtioResource::_3D { width, height, .. } => {
+                let rect = gpu::Rect {
+                    x: 0,
+                    y: 0,
+                    width: *width,
+                    height: *height,
+                };
+
+                let _ = chan.set_scanout(rect, scanout, res_id).inspect_err(|e|
+                    error!("{}: failed to set scanout: {:?}", function!(), e)
+                );
+
+                rect
+            },
+            VirtioResource::Blob { layout, .. } => {
+                let layout = layout.read().ok_or(STATUS::INVALID_PARAMETER).inspect_err(|e|
+                    error!("{}: allocation {:?} does not have blob layout yet", function!(), alloc)
+                )?;
+
+                if layout.modifier != 0 {
+                    error!("{}: blob is not linear: {:?}", function!(), alloc);
+                }
+
+                let rect = gpu::Rect {
+                    x: 0,
+                    y: 0,
+                    width: layout.info.width,
+                    height: layout.info.height,
+                };
+
+                let _ = chan.set_scanout_blob(rect, scanout, res_id, layout).inspect_err(|e|
+                    error!("{}: failed to set scanout: {:?}", function!(), e)
+                );
+
+                rect
+            },
+        };
+
+        chan.resource_flush_and_vsync(res_id, rect, scanout, addr)
     }
 }
 
