@@ -172,7 +172,7 @@ pub fn rtl_capture_stack_trace(skip: ULONG, frames: &mut [PVOID]) -> &[PVOID] {
     &frames[..len]
 }
 
-pub struct NtTime(Option<i64>);
+pub struct NtTime(pub Option<i64>);
 
 impl NtTime {
     pub const INFINITE: NtTime = NtTime::infinite();
@@ -185,6 +185,12 @@ impl NtTime {
 
     pub const fn relative_ms(ms: u32) -> Self {
         let v = ms as i64 * -10_000;
+
+        Self(Some(v))
+    }
+
+    pub const fn performance_counter(timestamp: u64, freq: u64) -> Self {
+        let v = (timestamp as u128 * 10_000_000u128 / freq as u128) as i64;
 
         Self(Some(v))
     }
@@ -410,17 +416,27 @@ impl Drop for KeThread {
     }
 }
 
-//pub fn spawn<T: Send>(f: fn(&mut T), ctx: *mut T) -> Result<Self, winresult::NtStatus> {
-pub struct KeTimer<T: Send>(PEX_TIMER, *mut (fn(&T), *const T));
+struct ExTimerContext<T: Send> {
+    callback: fn(&ExTimer<T>, &T),
+    context: *const T,
+}
 
-impl<T: Send> KeTimer<T> {
-    pub fn new_hires(f: fn(&T), ctx: *const T) -> Result<Self, winresult::NtStatus> {
-        extern "C" fn timer_trampoline<T>(timer: PEX_TIMER, context: PVOID) {
-            let (f, ctx) = unsafe { *(context as *mut _ as *const (fn(&T), *const T)) };
-            f(unsafe { &*ctx });
+pub struct ExTimer<T: Send>(PEX_TIMER, *mut ExTimerContext<T>);
+
+impl<T: Send> ExTimer<T> {
+    pub fn new_hires(f: fn(&ExTimer<T>, &T), ctx: *const T) -> Result<Self, winresult::NtStatus> {
+        extern "C" fn timer_trampoline<T: Send>(timer: PEX_TIMER, ctx: PVOID) {
+            let timer = ExTimer(timer, ctx as *mut ExTimerContext<T>);
+            let f = unsafe { (*timer.1).callback };
+            let ctx = unsafe { (*timer.1).context };
+            f(&timer, unsafe { &*ctx });
+            core::mem::forget(timer);
         }
 
-        let context = Box::into_raw(Box::try_new((f, ctx as *const _)).map_err(|_| winresult::STATUS::NO_MEMORY)?);
+        let context = Box::into_raw(Box::try_new(ExTimerContext {
+            callback: f,
+            context: ctx as *const _,
+        }).map_err(|_| winresult::STATUS::NO_MEMORY)?);
 
         assert_irql!(<= DISPATCH_LEVEL);
         let timer = unsafe { ExAllocateTimer(Some(timer_trampoline::<T>), context as *mut _, EX_TIMER_HIGH_RESOLUTION) };
@@ -431,11 +447,20 @@ impl<T: Send> KeTimer<T> {
         Ok(Self(timer, context))
     }
 
-    pub fn start_periodic(&self, period: NtTime) -> Result<(), winresult::NtStatus> {
+    pub fn start_periodic(&self, period: NtTime, precise: bool) -> Result<(), winresult::NtStatus> {
         let period = period.0.ok_or(winresult::STATUS::INVALID_PARAMETER)?;
 
         assert_irql!(<= DISPATCH_LEVEL);
         unsafe { ExSetTimer(self.0, -period, period, null_mut()) == 0 };
+
+        Ok(())
+    }
+
+    pub fn start_oneshot(&self, timeout: NtTime) -> Result<(), winresult::NtStatus> {
+        let timeout = timeout.0.ok_or(winresult::STATUS::INVALID_PARAMETER)?;
+
+        assert_irql!(<= DISPATCH_LEVEL);
+        unsafe { ExSetTimer(self.0, -timeout, 0, null_mut()) == 0 };
 
         Ok(())
     }
@@ -446,7 +471,7 @@ impl<T: Send> KeTimer<T> {
     }
 }
 
-impl<T: Send> Drop for KeTimer<T> {
+impl<T: Send> Drop for ExTimer<T> {
     fn drop(&mut self) {
         self.cancel();
 

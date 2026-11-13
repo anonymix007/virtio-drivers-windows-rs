@@ -27,7 +27,7 @@ use alloc::{
 use wdk::{
     dxgkrnl::*,
     wdm::{
-        KeTimer,
+        ExTimer,
         NtTime,
     },
     spin::SpinMutex,
@@ -1123,7 +1123,7 @@ impl Drop for FlipTimerContext {
 */
 
 pub struct FlipTimer {
-    pub timer: KeTimer<FlipTimerContext>,
+    pub timer: ExTimer<FlipTimerContext>,
     pub inner: Box<FlipTimerContext>,
 }
 
@@ -1131,7 +1131,7 @@ impl FlipTimer {
     pub fn try_new(data: FlipTimerContext) -> Result<Self, NtStatus> {
         let inner = Box::new(data);
 
-        let timer = KeTimer::new_hires(|context: &FlipTimerContext| {
+        let timer = ExTimer::new_hires(|context: &FlipTimerContext| {
             //trace!("{}: flip", function!());
             context.flip();
         }, &*inner as *const _)?;
