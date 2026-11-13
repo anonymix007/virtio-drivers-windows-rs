@@ -54,7 +54,6 @@ use alloc::{
     vec::Vec,
 };
 
-//use offset_allocator;
 use bitflags::bitflags;
 use smallvec::SmallVec;
 use pin_init::*;
@@ -126,17 +125,8 @@ pub struct CapsetInfo {
     pub size: u32,
 }
 
-//#[derive(Debug)]
-//enum Message {
-//    Control(gpu::GpuControlCommand),
-//    Cursor(gpu::GpuCursorCommand),
-//}
-
-const MAX_COMMAND_SIZE:  usize = 120;
-const MAX_RESPONSE_SIZE: usize = 56;
-// TODO: check control command sizes
-//const _: () = assert!(size_of::<gpu::COMMAND_TYPE>() < MAX_COMMAND_SIZE);
-
+const CONTROL_COMMAND_SIZE:  usize = 120;
+const CONTROL_RESPONSE_SIZE: usize = 56;
 const CURSOR_COMMAND_SIZE: usize = 56;
 const CURSOR_RESPONSE_SIZE: usize = 24;
 const _: () = assert!(size_of::<gpu::UpdateCursor>() <= CURSOR_COMMAND_SIZE);
@@ -238,34 +228,11 @@ impl SyncEvent {
     }
 }
 
-//#[repr(transparent)]
-//#[derive(Clone)]
-//struct CancellationSignal(Arc<AtomicBool>);
-//
-//impl CancellationSignal {
-//    pub fn new() -> Self {
-//        Self(Arc::new(AtomicBool::new(false)))
-//    }
-//
-//    pub fn cancel(&self) {
-//        self.0.store(true, Ordering::SeqCst);
-//    }
-//
-//    pub fn cancelled(&self) -> bool {
-//        self.0.load(Ordering::SeqCst)
-//    }
-//}
-
 #[derive(Clone, Debug)]
 pub struct AllocationsBatch(SmallVec<[Arc<DeviceSpecificAllocation>; 2]>);
 
 impl AllocationsBatch {
     pub fn new(allocations: SmallVec<[Arc<DeviceSpecificAllocation>; 2]>) -> Self {
-        //for alloc in &allocations {
-        //    trace!("{}: marking {:?} busy", function!(), alloc.alloc);
-        //    alloc.alloc.mark_busy();
-        //}
-
         Self(allocations)
     }
 }
@@ -358,28 +325,10 @@ impl<const MAX_INLINE: usize> Default for Callback<MAX_INLINE> {
     }
 }
 
-//impl Callback {
-//    // pub fn blocking(event: ...) -> Self
-//}
-
 const CONTROL_QUEUE_SIZE: usize = 256;
 const CURSOR_QUEUE_SIZE:  usize = 16;
 
-const CONTROL_FAST_QUEUE_SIZE: usize = CONTROL_QUEUE_SIZE * 3;
-const CURSOR_FAST_QUEUE_SIZE:  usize = CURSOR_QUEUE_SIZE * 4;
-
 const FAST_QUEUE_SIZE: usize = 2048;
-
-/*
-pub fn new_bytes<T: IntoBytes + FromBytes + KnownLayout>() -> Result<(Layout, NonNull<[u8]>), NtStatus> {
-    let layout = Layout::new<T>();
-
-    //let ptr = Box::into_raw(T::new_box_zeroed()?);
-    //Ok(unsafe {
-    //    Box::from_raw(from_raw_parts_mut(transmute::<*mut T, *mut u8>(ptr), len))
-    //})
-}
-*/
 
 #[derive(Clone, Copy)]
 pub struct AlignedAlloc<const N: usize>;
@@ -589,13 +538,11 @@ fn slice_in_one_page(slice: &[u8]) -> bool {
     start_page == end_page
 }
 
-
 struct Buffer<const IN: usize, const OUT: usize> {
     input: MaybeInlineBuffer<IN>,
     output: MaybeInlineBuffer<OUT>,
     callback: Callback<OUT>,
 }
-//const _: () = assert!(size_of::<Option<Buffer<128, 64>>>() == 240);
 
 struct Buffers<const BUFFERS: usize, const IN: usize, const OUT: usize> {
     inputs: AlignedBox<[Option<MaybeInlineBuffer<IN>>; BUFFERS]>,
@@ -650,16 +597,11 @@ impl<T> AsyncQueue<T> {
     }
 }
 
-struct Queue<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const OUT: usize> {
+struct Queue<const Q: u16, const SIZE: usize, const IN: usize, const OUT: usize> {
     queue: VirtQueue<DxgkInterface, SIZE>,
     buffers: Buffers<SIZE, IN, OUT>,
     free: ArrayQueue<usize>,
-    //nop: SegQueue<u32>,
-
-    //chan: Pin<Arc<AsyncQueue<Buffer<IN, OUT>>>>,
     chan: QueueChannel<IN, OUT>,
-
-    //last_submitted_fence: AtomicU64,
 }
 
 const DEFAULT_BLOCKING_TIMEOUT: u32 = 5_000;
@@ -759,7 +701,7 @@ impl<const IN: usize, const OUT: usize> QueueChannel<IN, OUT> {
     }
 }
 
-impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const OUT: usize> Queue<Q, SIZE, FAST, IN, OUT> {
+impl<const Q: u16, const SIZE: usize, const IN: usize, const OUT: usize> Queue<Q, SIZE, IN, OUT> {
     const IN_OK: () = assert!(size_of::<MaybeInlineBuffer<IN>>().is_power_of_two());
     const OUT_OK: () = assert!(size_of::<MaybeInlineBuffer<OUT>>().is_power_of_two());
 
@@ -790,11 +732,7 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
             queue <- init_queue,
             buffers <- Buffers::new(),
             chan: QueueChannel::try_new()?,
-            //fast: ArrayQueue::new(FAST),
-            //slow: SegQueue::new(),
-            //nop: SegQueue::new(),
             free <- init_free,
-            //last_submitted_fence: AtomicU64::new(0),
         }? NtStatus)
     }
 
@@ -1153,13 +1091,11 @@ impl<const Q: u16, const SIZE: usize, const FAST: usize, const IN: usize, const 
     }
 }
 
-type ControlQueue = Queue<{ gpu::QUEUE_TRANSMIT }, CONTROL_QUEUE_SIZE, CONTROL_FAST_QUEUE_SIZE, MAX_COMMAND_SIZE, MAX_RESPONSE_SIZE>;
-type CursorQueue = Queue<{ gpu::QUEUE_CURSOR }, CURSOR_QUEUE_SIZE, CURSOR_FAST_QUEUE_SIZE, CURSOR_COMMAND_SIZE, CURSOR_RESPONSE_SIZE>;
-type ControlChannel = QueueChannel<MAX_COMMAND_SIZE, MAX_RESPONSE_SIZE>;
+type ControlQueue = Queue<{ gpu::QUEUE_TRANSMIT }, CONTROL_QUEUE_SIZE, CONTROL_COMMAND_SIZE, CONTROL_RESPONSE_SIZE>;
+type CursorQueue = Queue<{ gpu::QUEUE_CURSOR }, CURSOR_QUEUE_SIZE, CURSOR_COMMAND_SIZE, CURSOR_RESPONSE_SIZE>;
+type ControlChannel = QueueChannel<CONTROL_COMMAND_SIZE, CONTROL_RESPONSE_SIZE>;
 type CursorChannel = QueueChannel<CURSOR_COMMAND_SIZE, CURSOR_RESPONSE_SIZE>;
 
-//const _: () = assert!(size_of::<ControlQueue>() == 17664);
-//const _: () = assert!(size_of::<CursorQueue>() == 2304);
 const _: () = assert!(size_of::<ArrayQueue<usize>>() == 384);
 
 // TODO: surely there's a better way
@@ -1204,19 +1140,12 @@ struct Thread {
 
     #[pin]
     control_irq: KeEvent,
-    //#[pin]
-    //control_msg: KeEvent,
 
     #[pin]
     cursor_irq: KeEvent,
-    //#[pin]
-    //cursor_msg: KeEvent,
 
     #[pin]
     config_irq: KeEvent,
-
-    //#[pin]
-    //nop_msg: KeEvent,
 
     #[pin]
     stop: KeEvent,
@@ -1224,11 +1153,8 @@ struct Thread {
 
 struct ThreadEvents<'t> {
     control_irq: Pin<&'t KeEvent>,
-    //control_msg: Pin<&'t KeEvent>,
     cursor_irq: Pin<&'t KeEvent>,
-    //cursor_msg: Pin<&'t KeEvent>,
     config_irq: Pin<&'t KeEvent>,
-    //nop_msg: Pin<&'t KeEvent>,
     stop: Pin<&'t KeEvent>,
 }
 
@@ -1237,11 +1163,8 @@ impl Thread {
         pin_init!(Self {
             thread: None,
             control_irq <- KeEvent::new(EventType::Synchronization, false),
-            //control_msg <- KeEvent::new(EventType::Synchronization, false),
             cursor_irq <- KeEvent::new(EventType::Synchronization, false),
-            //cursor_msg <- KeEvent::new(EventType::Synchronization, false),
             config_irq <- KeEvent::new(EventType::Synchronization, false),
-            //nop_msg <- KeEvent::new(EventType::Synchronization, false),
             stop <- KeEvent::new(EventType::Synchronization, false),
         }? NtStatus)
     }
@@ -1249,7 +1172,6 @@ impl Thread {
     fn start<T: Send>(self: &mut Pin<Box<Self>>, f: fn(&mut T), ctx: *mut T) -> Result<(), NtStatus> {
         let thread = self.thread();
         *thread = Some(KeThread::spawn(f, ctx)?);
-        //thread.as_ref().unwrap().set_priority(ThreadPriority::LowRealtime);
         thread.as_ref().unwrap().set_priority(ThreadPriority::High);
 
         Ok(())
@@ -1265,20 +1187,11 @@ impl Thread {
         }
     }
 
-    //fn thread(self: &mut Pin<Box<Self>>) -> &mut Option<KeThread> {
-    //    unsafe {
-    //        self.as_mut().map_unchecked_mut(|t| &mut t.thread).get_unchecked_mut()
-    //    }
-    //}
-
     fn events<'t>(self: &'t Pin<Box<Self>>) -> ThreadEvents<'t> {
         ThreadEvents {
             control_irq: unsafe { self.as_ref().map_unchecked(|t| &t.control_irq) },
-            //control_msg: unsafe { self.as_ref().map_unchecked(|t| &t.control_msg) },
             cursor_irq: unsafe { self.as_ref().map_unchecked(|t| &t.cursor_irq) },
-            //cursor_msg: unsafe { self.as_ref().map_unchecked(|t| &t.cursor_msg) },
             config_irq: unsafe { self.as_ref().map_unchecked(|t| &t.config_irq) },
-            //nop_msg: unsafe { self.as_ref().map_unchecked(|t| &t.nop_msg) },
             stop: unsafe { self.as_ref().map_unchecked(|t| &t.stop) },
         }
     }
