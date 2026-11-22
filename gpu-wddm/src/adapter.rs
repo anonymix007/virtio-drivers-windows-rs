@@ -1007,7 +1007,7 @@ struct AdapterState {
     is_vga: bool,
     is_msi: bool,
     supported_capsets: CapsetMask,
-    capset_info: [(CapsetInfo, rwlock::RwLock<Option<Box<[u8]>>>); 64],
+    capset_info: [(CapsetInfo, Option<Box<[u8]>>); 64],
 
     max_simultaneously_running_commands: [AtomicU32; Engine::TOTAL_COUNT as usize],
 
@@ -1017,6 +1017,34 @@ struct AdapterState {
     empty_cursor: Option<Cursor>,
     outputs: [Option<VidPnOutput>; 16],
     source_target_map: [SmallVec<[D3DDDI_VIDEO_PRESENT_TARGET_ID; 16]>; 16]
+}
+
+impl AdapterState {
+    fn get_drm_context_type(&self) -> DrmContext {
+        if !self.supported_capsets.contains(CapsetId::Drm.into()) {
+            return DrmContext::None
+        }
+
+        let (_, Some(data)) = &self.capset_info[CapsetId::Drm as usize] else {
+            return DrmContext::None
+        };
+
+        let capset_data = match crate::virgl::VirglRendererCapsetDrm::ref_from_prefix(data) {
+            Ok((data, suffix)) => data,
+            Err(e) => {
+                error!("{}: failed to parse VirglRendererCapsetDrm: {:?}", function!(), e);
+                return DrmContext::None;
+            },
+        };
+
+        match capset_data.context_type.try_into() {
+            Ok(context_type) => context_type,
+            Err(e) => {
+                warn!("{}: failed to convert drm context type {}: {:?}", function!(), { capset_data.context_type }, e);
+                DrmContext::None
+            }
+        }
+    }
 }
 
 const VIRTIO_GPU_ADAPTER_TAG: u64 = u64::from_ne_bytes(*b"VGPUADAP");
@@ -1388,7 +1416,7 @@ impl Adapter {
             is_msi,
             negotiated_features,
             supported_capsets: CapsetMask::default(),
-            capset_info <- init_array_from_fn(|_| (CapsetInfo::default(), rwlock::RwLock::new(None))),
+            capset_info <- init_array_from_fn(|_| (CapsetInfo::default(), None)),
             queue_handler <- QueueHandler::new(pci_transport, pci_root.configuration_access, *negotiated_features, shmem),
             max_simultaneously_running_commands <- init_array_from_fn(|_| AtomicU32::new(0)),
             system_display_info: None,
@@ -1404,7 +1432,16 @@ impl Adapter {
         let (supported_capsets, capset_info) = chan.get_capset_infos(num_capsets)?;
 
         state.supported_capsets = supported_capsets;
-        state.capset_info = capset_info.map(|i| (i, rwlock::RwLock::new(None)));
+
+        for (i, &capset_info) in capset_info.iter().enumerate() {
+            state.capset_info[i] = if capset_info.size > 0 && let Ok(capset_id) = CapsetId::try_from(i as u32) {
+                // TODO: should an error be fatal here?
+                let data = chan.get_capset(capset_id, &capset_info)?;
+                (capset_info, Some(data))
+            } else {
+                (capset_info, None)
+            };
+        }
 
         let display_modes = chan.get_display_info()?;
 
@@ -1494,10 +1531,7 @@ impl Adapter {
                 umd_priv.tag = AdapterInfo::TAG;
                 umd_priv.luid = state.luid;
                 umd_priv.capset_mask = state.supported_capsets;
-                umd_priv.supports_3d = state.negotiated_features.contains(gpu::Features::VIRGL) &&
-                                       state.negotiated_features.contains(gpu::Features::RESOURCE_BLOB) &&
-                                       state.negotiated_features.contains(gpu::Features::CONTEXT_INIT);
-                umd_priv.has_shmem = true;
+                umd_priv.drm_context = state.get_drm_context_type();
 
                 Ok(())
             },
@@ -1794,30 +1828,30 @@ impl Adapter {
 
         match *escape_tag {
             ESCAPE_CAPSET_TAG => {
-                let capset = check_buffer_size!(escape.pPrivateDriverData, escape.PrivateDriverDataSize, Capset)?;
+                let capset_raw = check_buffer_size!(escape.pPrivateDriverData, escape.PrivateDriverDataSize, CapsetRaw)?;
+                let capset = match capset_raw.try_as_capset() {
+                    Ok(capset) => capset,
+                    Err(e) => {
+                        error!("{}: unsupported capset {}: {:?}", function!(), { capset_raw.capset_id }, e);
+                        return Err(NtStatus(STATUS::INVALID_PARAMETER_1));
+                    },
+                };
+
                 trace!("{}: capset: {:?}", function!(), capset);
 
                 let id = capset.capset_id;
                 let index = id as usize;
 
-                if index >= state.capset_info.len() {
+                if index >= state.capset_info.len() || !state.supported_capsets.contains(id.into()) || state.capset_info[index].1.is_none() {
                     error!("{}: unsupported capset: {:?}", function!(), id);
                     return Err(NtStatus(STATUS::INVALID_PARAMETER_1));
                 }
 
-                let (info, data) = &state.capset_info[index];
-
-                if data.read().is_none() {
-                    data.write().replace(state.queue_handler.chan.get_capset(id, info)?);
-                    debug!("{}: capset data: {:?}", function!(), data.read().as_ref().unwrap());
-                }
+                let (info, capset_data) = &state.capset_info[index];
 
                 let user_slice = capset.capset_slice(escape.PrivateDriverDataSize as _);
-                let capset_data = data.read();
                 let capset_data = capset_data.as_ref().unwrap();
                 let copy_size = core::cmp::min(user_slice.len(), capset_data.len());
-
-                //[..user_slice.len()];
 
                 debug!("{}: copying local capset len {} to user len {}", function!(), capset_data.len(), user_slice.len());
 

@@ -301,6 +301,34 @@ impl From<CapsetId> for CapsetMask {
     }
 }
 
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DrmContext {
+    None     = 0,
+    Msm      = 1,
+    Amdgpu   = 2,
+    I915     = 3,
+    Asahi    = 4,
+    Panfrost = 5,
+    Xe       = 6,
+}
+
+impl TryFrom<u32> for DrmContext {
+    type Error = &'static str;
+
+    fn try_from(context_type: u32) -> Result<Self, &'static str> {
+        match context_type {
+            1 => Ok(DrmContext::Msm),
+            2 => Ok(DrmContext::Amdgpu),
+            3 => Ok(DrmContext::I915),
+            4 => Ok(DrmContext::Asahi),
+            5 => Ok(DrmContext::Panfrost),
+            6 => Ok(DrmContext::Xe),
+            _ => Err("unknown context type"),
+        }
+    }
+}
+
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone, Tagged)]
 #[tagged(ADAPTER_INFO_TAG)]
@@ -309,8 +337,7 @@ pub struct AdapterInfo {
 
     pub luid: u64,
     pub capset_mask: CapsetMask,
-    pub supports_3d: bool,
-    pub has_shmem: bool,
+    pub drm_context: DrmContext,
 }
 
 /*
@@ -1035,7 +1062,7 @@ impl SubmitCommand {
 
 pub const MAX_SUBMIT_COMMAND_VIRTUAL_SIZE: u32 = 8192;
 
-const _: () = assert!(core::mem::size_of::<AdapterInfo>() == 26);
+const _: () = assert!(core::mem::size_of::<AdapterInfo>() == 28);
 //const _: () = assert!(core::mem::size_of::<PCIInfo>() == 24);
 const _: () = assert!(core::mem::size_of::<Capset>() == 16);
 const _: () = assert!(core::mem::size_of::<ContextInit>() == 80);

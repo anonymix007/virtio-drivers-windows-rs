@@ -10,6 +10,17 @@ use wdk::dxgkrnl::D3DDDIFORMAT;
 use crate::function;
 use crate::allocation::BlobLayout;
 
+#[repr(C, packed)]
+#[derive(Clone, Copy, Debug, FromBytes, Immutable, KnownLayout)]
+pub struct VirglRendererCapsetDrm {
+    pub wire_format_version: u32,
+    pub version_major: u32,
+    pub version_minor: u32,
+    pub version_patchlevel: u32,
+    pub context_type: u32,
+    pub _pad: u32,
+}
+
 pub const VIRGL_FORMAT_NONE: u32 = 0;
 pub const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 pub const VIRGL_FORMAT_B8G8R8X8_UNORM: u32 = 2;
