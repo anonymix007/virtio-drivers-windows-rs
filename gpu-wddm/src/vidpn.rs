@@ -1667,7 +1667,7 @@ impl VidPnOutput {
                 rect
             },
             VirtioResource::Blob { layout, .. } => {
-                let layout = layout.read().ok_or(STATUS::INVALID_PARAMETER).inspect_err(|e|
+                let layout = layout.ok_or(STATUS::INVALID_PARAMETER).inspect_err(|e|
                     error!("{}: allocation {:?} does not have blob layout yet", function!(), alloc)
                 )?;
 

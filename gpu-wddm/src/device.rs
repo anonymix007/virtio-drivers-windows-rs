@@ -389,7 +389,7 @@ impl Device {
             }
 
             let id = src_alloc.id().unwrap();
-            if let VirtioResource::Blob { layout, .. } = src_alloc.resource() && let Some(layout) = *layout.read() {
+            if let VirtioResource::Blob { layout, .. } = src_alloc.resource() && let Some(layout) = layout.as_ref() {
                 let cmd = Command::virgl_set_type(&self.chan, Some(context_id), id, &layout, None, &mut dmabuf[dmabuf_offset..]);
                 dmabuf_offset += cmd.len();
                 dma_priv.commands.push(cmd);
@@ -407,7 +407,7 @@ impl Device {
             }
 
             let id = dst_alloc.id().unwrap();
-            if let VirtioResource::Blob { layout, .. } = dst_alloc.resource() && let Some(layout) = *layout.read() {
+            if let VirtioResource::Blob { layout, .. } = dst_alloc.resource() && let Some(layout) = layout.as_ref() {
                 let cmd = Command::virgl_set_type(&self.chan, Some(context_id), id, &layout, None, &mut dmabuf[dmabuf_offset..]);
                 dmabuf_offset += cmd.len();
                 dma_priv.commands.push(cmd);
@@ -835,7 +835,7 @@ impl Device {
 
     pub fn open_allocation(self: Arc<Self>, flags: DXGK_OPENALLOCATIONFLAGS, allocations: &mut [DXGK_OPENALLOCATIONINFO]) -> Result<(), NtStatus> {
         for alloc_info in allocations {
-            let Some(alloc) = self.chan.dxgk_interface().allocation_from_handle(alloc_info.hAllocation) else {
+            let Some(mut alloc) = self.chan.dxgk_interface().allocation_from_handle(alloc_info.hAllocation) else {
                 error!("{}: invalid handle provided: {:X} (flags {:?})", function!(), alloc_info.hAllocation, flags);
                 return Err(NtStatus(STATUS::INVALID_HANDLE));
             };
@@ -850,7 +850,7 @@ impl Device {
             let alloc_priv = crate::check_buffer_size!(alloc_info.pPrivateDriverData, alloc_info.PrivateDriverDataSize, CreateAllocation)?;
             if flags.Create() {
                 if alloc.is_3d() {
-                    match alloc.query_layout(self.clone(), Some(device_specific.clone())) {
+                    let layout = match alloc.query_layout(self.clone(), Some(device_specific.clone())) {
                         Ok(Some(layout)) => {
                             alloc_priv.num_planes = layout.num_planes;
                             alloc_priv.modifier = layout.modifier;
@@ -859,9 +859,25 @@ impl Device {
                                stride: plane.stride as u64,
                                size: plane.size as u64,
                             });
+                            Some(layout)
                         },
-                        Ok(None) => debug!("{}: failed to query resource layout: no layout: {:?}", function!(), alloc),
-                        Err(e) => warn!("{}: failed to query resource layout: {:?}", function!(), e),
+                        Ok(None) => {
+                            debug!("{}: failed to query resource layout: no layout: {:?}", function!(), alloc);
+                            None
+                        },
+                        Err(e) => {
+                            warn!("{}: failed to query resource layout: {:?}", function!(), e);
+                            None
+                        },
+                    };
+
+                    if let Some(layout) = layout {
+                        // It's fine to modify the allocation here, other existing references are not used yet
+                        // because the allocation is just being created
+                        unsafe {
+                            let alloc_mut = Arc::get_mut_unchecked(&mut alloc);
+                            alloc_mut.store_layout(layout);
+                        }
                     }
                 }
                 alloc_priv.res_id = alloc.id().map_or(0, NonZero::get);

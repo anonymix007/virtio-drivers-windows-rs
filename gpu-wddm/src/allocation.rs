@@ -228,7 +228,7 @@ pub struct BlobLayout {
     pub planes: [PlaneLayout; 4],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum VirtioResource {
     _3D {
         target: VirglTarget,
@@ -241,21 +241,30 @@ pub enum VirtioResource {
         last_level: u32,
         nr_samples: u32,
         flags: VirglFlags,
-        map: RwLock<(u64, SmallVec<[MemEntry; 2]>)>,
-        layout: RwLock<Option<VirglResourceLayout>>,
+        layout: Option<VirglResourceLayout>,
         size: u64,
     },
     Blob {
         id: u64,
         mem: BlobMem,
         flags: BlobFlag,
-        layout: RwLock<Option<BlobLayout>>,
-        map: RwLock<Option<(offset_allocator::Allocation, MdlOwned, NonNull<u8>)>>,
+        layout: Option<BlobLayout>,
         size: u64,
     },
 }
 
+#[derive(Debug)]
+pub enum ResourceMapping {
+    _3D {
+        map: RwLock<(u64, SmallVec<[MemEntry; 2]>)>,
+    },
+    Blob {
+        map: RwLock<Option<(offset_allocator::Allocation, MdlOwned, NonNull<u8>)>>,
+    },
+}
+
 // This is stupid, there is absolutely no reason why this can't be derived
+/*
 impl Clone for VirtioResource {
     fn clone(&self) -> Self {
         match self {
@@ -314,6 +323,7 @@ impl Clone for VirtioResource {
         }
     }
 }
+*/
 
 impl From<Allocate3d> for VirtioResource {
     fn from(info: Allocate3d) -> Self {
@@ -328,8 +338,9 @@ impl From<Allocate3d> for VirtioResource {
             last_level: info.last_level,
             nr_samples: info.nr_samples,
             flags: VirglFlags::from_bits_retain(info.flags),
-            map: RwLock::new((0, SmallVec::new())),
-            layout: RwLock::new(None),
+            //map: RwLock::new((0, SmallVec::new())),
+            //layout: RwLock::new(None),
+            layout: None,
             size: info.size,
         }
     }
@@ -343,8 +354,9 @@ impl From<(AllocateBlob, Option<BlobLayout>)> for VirtioResource {
             id: info.id,
             mem: info.mem,
             flags: info.flags,
-            layout: RwLock::new(layout),
-            map: RwLock::new(None),
+            layout,
+            //layout: RwLock::new(layout),
+            //map: None,
             size: info.size,
         }
     }
@@ -366,18 +378,15 @@ impl Into<CreateAllocation> for VirtioResource {
                 last_level,
                 nr_samples,
                 flags,
-                map,
                 layout,
                 size,
             } => {
-                let layout = if let Some(layout) = *layout.read() {
-                    layout
-                } else {
+                let layout = layout.unwrap_or(
                     VirglResourceLayout {
                         modifier: DRM_FORMAT_MOD_INVALID,
                         ..unsafe { core::mem::zeroed() }
                     }
-                };
+                );
                 CreateAllocation {
                     base: CreateAllocationInfo {
                        _3d: Allocate3d {
@@ -410,10 +419,9 @@ impl Into<CreateAllocation> for VirtioResource {
                 mem,
                 flags,
                 layout,
-                map,
                 size,
             } => {
-                let layout = (*layout.read()).unwrap_or(BlobLayout {
+                let layout = layout.unwrap_or(BlobLayout {
                     info: BlobInfo {
                         width: 0,
                         height: 0,
@@ -587,6 +595,7 @@ pub struct Allocation {
     //create_fence: Pin<Arc<KeEvent>>,
     flags: AtomicU32,
     resource: VirtioResource,
+    mapping: ResourceMapping,
     busy: (Pin<Arc<KeEvent>>, AtomicUsize),
     sync: RwLock<Vec<NonNull<KeEvent>>>,
     // TODO: this should be FAST_MUTEX or something
@@ -610,10 +619,9 @@ impl Allocation {
         let resource = info.into();
 
         // Blobs are created later
-        let flags = if matches!(resource, VirtioResource::_3D { .. }) {
-            ALLOCATION_FLAG_CREATED
-        } else {
-            0
+        let (flags, mapping) = match resource {
+            VirtioResource::_3D { .. } => (ALLOCATION_FLAG_CREATED, ResourceMapping::_3D { map: RwLock::new((0, SmallVec::new())) }),
+            VirtioResource::Blob { .. } => (0, ResourceMapping::Blob { map: RwLock::new(None) }),
         };
 
         Ok(Self {
@@ -622,6 +630,7 @@ impl Allocation {
             //fence,
             flags: AtomicU32::new(flags),
             resource,
+            mapping,
             busy: (Arc::try_pin_init(KeEvent::new(EventType::Notification, false))?, AtomicUsize::new(0)),
             //sync: SpinMutex::new(Vec::new()),
             sync: RwLock::new(Vec::new()),
@@ -731,29 +740,29 @@ impl Allocation {
     }
 
     pub fn mapped_range(&self) -> Option<(u64, u64)> {
-        match &self.resource {
-            VirtioResource::_3D {..} => {
-                None
-            },
-            VirtioResource::Blob { size, map, ..} => {
+        let start = match &self.mapping {
+            ResourceMapping::_3D { .. } => None,
+            ResourceMapping::Blob { map } => {
                 if let Some((map, mdl, ptr)) = map.read().as_ref() {
-                    Some((map.offset as u64 * wdk::wdm::PAGE_SIZE as u64, *size))
+                    Some(map.offset as u64 * wdk::wdm::PAGE_SIZE as u64)
                 } else {
                     None
                 }
-            },
-        }
+            }
+        }?;
+
+        Some((start, self.size()))
     }
 
     pub fn map_blob(&self, device: &Device) -> Result<NonNull<u8>, NtStatus> {
         let is_mapped = self.is_mapped();
 
-        match &self.resource {
-            VirtioResource::_3D {..} => {
+        match (&self.resource, &self.mapping) {
+            (VirtioResource::_3D {..}, ResourceMapping::_3D {..}) => {
                 error!("{}: cannot map 3d resource: {:?}", function!(), self);
                 Err(NtStatus(STATUS::INVALID_PARAMETER))
             },
-            VirtioResource::Blob { size, flags, map, ..} => {
+            (VirtioResource::Blob { size, flags, ..}, ResourceMapping::Blob { map }) => {
                 //if !self.can_be_mapped
                 if flags.contains(BlobFlag::MAPPABLE) {
                     if is_mapped {
@@ -818,17 +827,18 @@ impl Allocation {
                     Err(NtStatus(STATUS::INVALID_PARAMETER))
                 }
             },
+            _ => unreachable!("invalid allocation"),
         }
     }
 
     pub fn unmap_blob(&self, chan: &GpuChannel) -> Result<(), NtStatus> {
         if self.is_mapped() {
             self.set_mapped(false);
-            let (offset_alloc, mdl, ptr) = match &self.resource {
-                VirtioResource::_3D {..} => {
+            let (offset_alloc, mdl, ptr) = match &self.mapping {
+                ResourceMapping::_3D { .. } => {
                     unreachable!();
                 },
-                VirtioResource::Blob {map, ..} => {
+                ResourceMapping::Blob { map } => {
                     map.write().take().unwrap()
                 },
             };
@@ -921,7 +931,7 @@ impl Allocation {
                 })
             },
             VirtioResource::Blob {layout, ..} => {
-                let Some(layout) = *layout.read() else {
+                let Some(layout) = layout.as_ref() else {
                     error!("{}: blob layout is missing", function!());
                     return Err(NtStatus(STATUS::UNSUCCESSFUL));
                 };
@@ -954,33 +964,33 @@ impl Allocation {
     }
 
     pub fn num_attached_pages(&self) -> usize {
-        match &self.resource {
-            VirtioResource::_3D { map, .. } => map.read().1.len(),
-            VirtioResource::Blob { .. } => 0,
+        match &self.mapping {
+            ResourceMapping::_3D { map, .. } => map.read().1.len(),
+            ResourceMapping::Blob { .. } => 0,
         }
     }
 
-    pub fn size(&self) -> usize {
+    pub fn size(&self) -> u64 {
         match &self.resource {
-            VirtioResource::_3D { size, .. } => *size as _,
-            VirtioResource::Blob { size, .. } => *size as _,
+            VirtioResource::_3D { size, .. } => *size,
+            VirtioResource::Blob { size, .. } => *size,
         }
     }
 
-    pub fn total_attached_bytes(&self) -> usize {
-        match &self.resource {
-            VirtioResource::_3D { map, .. } => map.read().1.iter().fold(0usize, |len, entry| len + entry.length as usize),
-            VirtioResource::Blob { .. } => 0,
+    pub fn total_attached_bytes(&self) -> u64 {
+        match &self.mapping {
+            ResourceMapping::_3D { map, .. } => map.read().1.iter().fold(0u64, |len, entry| len + entry.length as u64),
+            ResourceMapping::Blob { .. } => 0,
         }
     }
 
     pub fn fill_attached_pages(&self, entries: &mut [MemEntry]) -> bool {
-        match &self.resource {
-            VirtioResource::_3D { map, .. } => {
+        match &self.mapping {
+            ResourceMapping::_3D { map, .. } => {
                 entries.copy_from_slice(map.read().1.as_ref());
                 true
             },
-            VirtioResource::Blob { .. } => false,
+            ResourceMapping::Blob { .. } => false,
         }
     }
 
@@ -1076,11 +1086,13 @@ impl Allocation {
     */
 
     pub fn attach_pages(&self, offset: u64, pages: &[DXGK_PTE]) -> bool {
-        match &self.resource {
-            VirtioResource::_3D { map, size, .. } => {
+        let size = self.size();
+
+        match &self.mapping {
+            ResourceMapping::_3D { map } => {
                 let mut map = map.write();
                 let mut attached_size = map.1.iter().fold(0u64, |len, entry| len + entry.length as u64);
-                if attached_size >= *size {
+                if attached_size >= size {
                     // We got a duplicate, probably because there wasn't enough DMA buffer space to encode the command last time
                     // TODO: this should be detected more reliably by checking the virtual address
                     warn!("{}: already fully attached, but tried to attach again: {:?}", function!(), pages);
@@ -1135,21 +1147,21 @@ impl Allocation {
                             map.1.push(entry);
                         }
                     }
-                    debug!("{}: ready: {}, pages: {:?}", function!(), attached_size >= *size, pages);
+                    debug!("{}: ready: {}, pages: {:?}", function!(), attached_size >= size, pages);
                     debug!("{}: ({} / {}): {:?}", function!(), map.0, offset, map.1);
                     map.0 = offset;
                 }
 
-                attached_size >= *size
+                attached_size >= size
             },
-            VirtioResource::Blob { .. } => false,
+            ResourceMapping::Blob { .. } => false,
         }
     }
 
     pub fn query_layout(self: &Arc<Allocation>, device: Arc<Device>, device_specific: Option<Arc<DeviceSpecificAllocation>>) -> Result<Option<VirglResourceLayout>, NtStatus> {
         match &self.resource {
             VirtioResource::_3D { layout, .. } => {
-                if let Some(layout) = *layout.read() {
+                if let Some(&layout) = layout.as_ref() {
                     return Ok(Some(layout))
                 }
             }
@@ -1161,15 +1173,8 @@ impl Allocation {
 
         let device_specific = device_specific.map_or_else(|| self.clone().attach_to_device(device.clone(), false), Ok)?;
         match device.query_layout(&device_specific) {
-            Ok(layout_) => {
-                match &self.resource {
-                    VirtioResource::_3D { layout, .. } => {
-                        layout.write().replace(layout_);
-                    }
-                    _ => unreachable!(),
-                }
-
-                Ok(Some(layout_))
+            Ok(layout) => {
+                Ok(Some(layout))
             },
             Err(NtStatus(STATUS::REINITIALIZATION_NEEDED)) => Ok(None),
             Err(e) => {
@@ -1177,6 +1182,20 @@ impl Allocation {
                 Err(e)
             }
         }
+    }
+
+    pub fn store_layout(&mut self, new_layout: VirglResourceLayout) {
+        match &mut self.resource {
+            VirtioResource::_3D { layout, .. } => {
+                layout.replace(new_layout);
+            },
+            _ => {},
+        }
+    }
+
+    pub fn fill_info(&self, alloc_info: &mut CreateAllocation) {
+        *alloc_info = self.resource.clone().into();
+        alloc_info.res_id = self.id.get();
     }
 }
 

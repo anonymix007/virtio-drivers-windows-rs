@@ -1831,18 +1831,7 @@ impl Adapter {
                 let alloc = state.queue_handler.dxgk_interface().allocation_from_handle(res_info.handle).ok_or(STATUS::INVALID_HANDLE)?;
                 trace!("{}: res info for allocation {:?}", function!(), alloc);
 
-                let id = alloc.id().ok_or(STATUS::UNSUCCESSFUL)?.get();
-
-                if
-                    alloc.is_3d() && res_info.info.modifier == DRM_FORMAT_MOD_INVALID &&
-                    let Some(device) = <Device as TaggedExt>::from_arc_handle_clone(escape.hDevice)
-                {
-                    let _ = alloc.query_layout(device, None)?;
-                }
-
-                let resource = alloc.resource().clone();
-                res_info.info = resource.into();
-                res_info.info.res_id = id;
+                alloc.fill_info(&mut res_info.info);
 
                 Ok(())
             },
@@ -2612,9 +2601,10 @@ impl Adapter {
             ALLOCATE_BLOB_TAG => {
                 let alloc_blob = unsafe { &alloc_priv.base.blob };
 
-                if { alloc_blob.flags } == BlobFlag::NONE {
-                    warn!("{}: creating blob {} with no flags will probably fail", function!(), { alloc_blob.id });
-                }
+                // Apparently RADV does this and it's fine
+                //if { alloc_blob.flags } == BlobFlag::NONE {
+                //    warn!("{}: creating blob {} with no flags will probably fail", function!(), { alloc_blob.id });
+                //}
 
                 if { alloc_blob.mem }.contains(BlobMem::GUEST) {
                     error!("{}: guest blobs are not supported yet", function!());
