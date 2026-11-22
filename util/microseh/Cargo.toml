@@ -11,6 +11,9 @@ license = "MIT"
 keywords = ["seh", "windows", "hardware", "exception", "handler"]
 categories = ["os"]
 
+[lints]
+workspace = true
+
 [build-dependencies]
 cc = "1.1"
 ewdk = { path = "../ewdk" }

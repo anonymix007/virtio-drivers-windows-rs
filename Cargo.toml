@@ -6,6 +6,10 @@ members = ["gpu-wddm", "wdk"]
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
+# wtf is wrong with rust
+[workspace.lints.rust]
+uncommon_codepoints = "allow"
+
 [workspace.dependencies]
 #arrayvec = { version = "0.7.8", default-features = false }
 bindgen = "0.73.2"

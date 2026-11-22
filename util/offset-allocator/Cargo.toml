@@ -10,6 +10,9 @@ keywords = ["memory-management"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[lints]
+workspace = true
+
 [dependencies]
 log.workspace = true
 nonmax.workspace = true
