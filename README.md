@@ -70,6 +70,56 @@ Then, install the new driver:
 pnputil /add-driver \path\to\virtio_wddm_rs.inf /install
 ```
 
+## VM setup
+
+Mainline QEMU and virglrenderer builds are required. Sample QEMU command line:
+```bash
+#!/bin/bash
+
+set -xe
+
+# Only single GPU per VM is supported, choose the appropriate one here
+# Can be skipped there is only one on the host
+export DRM_RENDER_NODE=/dev/dri/renderD128
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/radeon_icd.json
+export DRI_PRIME=1002:164e
+export MESA_LOADER_DRIVER_OVERRIDE=radeonsi
+
+EFI_CODE="./OVMF_CODE.fd"
+EFI_VARS="./win11_VARS.fd"
+export VIRGL_LOG_FILE=virgl.log
+export VIRGL_LOG_LEVEL=debug
+export VIRGL_GBM_LAYOUT_FORCE_ENABLE=true
+export VIRGL_GBM_LAYOUT_ENABLE=true
+# Enable Vulkan Validation Layers for Venus
+#export VKR_DEBUG=validate
+
+qemu-system-x86_64 \
+    -trace 'virtio*' \
+    -trace 'virgl*' \
+    -d guest_errors \
+    -drive if=pflash,format=raw,unit=0,file=$EFI_CODE,readonly=on \
+    -drive if=pflash,format=raw,unit=1,file=$EFI_VARS \
+    -enable-kvm \
+    -cpu host \
+    -usb \
+    -machine q35 \
+    -serial file:driver.log \
+    -device "virtio-vga-gl,id=video3,hostmem=4G,blob=on,venus=on,xres=1920,yres=1080"
+    -device usb-tablet
+    -chardev socket,id=kd,path=/tmp/kernel-debug.sock,server=on,wait=off -serial chardev:kd \
+    -device usb-kbd \
+    -device e1000,netdev=nic0 \
+    -netdev user,id=nic0,hostfwd=tcp::10022-:22 \
+    -m 16G \
+    -object memory-backend-memfd,id=mem1,size=16G,share=on  \
+    -machine memory-backend=mem1 \
+    -smp 8 \
+    -display gtk,gl=on \
+    -hda 25h2.qcow2 2>&1 | tee qemu.log
+```
+You may try different `-display` backends, but note that at least `-display dbus` is broken on Nvidia in upstream QEMU as of now. Eventually I'll submit a patch.
+
 ## Gallery
 
 <img width="3026" height="1702" alt="demo" src="https://github.com/user-attachments/assets/8979a1b8-92c6-47d6-abdd-969d2a473a9a" />
