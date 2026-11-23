@@ -30,6 +30,46 @@ export KEY="/path/to/cert/localhost-km.pfx"
 ./dist.sh
 ```
 
+## Installation
+Driver package will be available in the target/dist folder. At the very least it will contain the following files:
+```console
+$ tree target/dist
+target/dist
+├── dx11um_virtio.dll
+├── virtio_icd.x86_64.json
+├── virtio_wddm_rs.cat
+├── virtio_wddm_rs.inf
+├── virtio_wddm_rs.sys
+└── vulkan_virtio.dll
+```
+Copy them to the VM. If you have an older version of the driver installed, it's recommended to uninstall it first:
+```cmd
+C:\Users\User>pnputil /enum-drivers
+Microsoft PnP Utility
+
+...
+Published Name:     oem1.inf
+Original Name:      virtio_wddm_rs.inf
+Provider Name:      anonymix007
+Class Name:         Display
+Class GUID:         {4d36e968-e325-11ce-bfc1-08002be10318}
+Driver Version:     11/22/2026 20.15.1.1
+Signer Name:        Virto test certificate
+Attributes:         Legacy
+WHCP Version:       Unknown
+...
+C:\Users\User>pnputil /delete-driver oem1.inf /uninstall /force
+Microsoft PnP Utility
+
+Ignoring /force when used with /uninstall to delete driver package.
+Driver package uninstalled.
+Driver package deleted successfully.
+```
+Then, install the new driver:
+```
+pnputil /add-driver \path\to\virtio_wddm_rs.inf /install
+```
+
 ## Gallery
 
 <img width="3026" height="1702" alt="demo" src="https://github.com/user-attachments/assets/8979a1b8-92c6-47d6-abdd-969d2a473a9a" />
