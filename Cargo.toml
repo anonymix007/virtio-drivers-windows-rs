@@ -31,6 +31,7 @@ nonmax = { version = "0.5.5", default-features = false }
 modular-bitfield = "0.13.1"
 itertools = { version = "0.15.0", default-features = false }
 #rcu_cell = { version = "1.2.4", default-features = false }
+arm-pl011-uart = "0.6.0"
 
 [profile.dev]
 opt-level = 'z'

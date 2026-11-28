@@ -5,10 +5,64 @@ use log::{LevelFilter, Log, Metadata, Record, SetLoggerError};
 use wdk::spin::{
     TimeoutMutex,
 };
-// TODO: aarch64
-use uart_16550::{Config, Uart16550Tty, backend::PioBackend};
 
-type SerialPort = Uart16550Tty<PioBackend>;
+// TODO: DbgPrintEx logger
+
+#[cfg(target_arch = "x86_64")]
+mod x86_64 {
+    use core::fmt::{Write, Error};
+
+    use uart_16550::{Config, Uart16550Tty, backend::PioBackend};
+
+    const SERIAL_PORT: u16 = 0x3f8;
+
+    #[repr(transparent)]
+    pub struct SerialPort(Uart16550Tty<PioBackend>);
+
+    impl SerialPort {
+        pub fn new() -> Self {
+            Self(unsafe { Uart16550Tty::new_port(SERIAL_PORT, Config::default()) }.unwrap())
+        }
+    }
+
+    impl Write for SerialPort {
+        fn write_str(&mut self, v: &str) -> Result<(), Error> {
+            self.0.write_str(v)
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+use x86_64::SerialPort;
+
+#[cfg(target_arch = "aarch64")]
+mod aarch64 {
+    use core::{
+        fmt::{Write, Error},
+        ptr::NonNull,
+    };
+    use arm_pl011_uart::{PL011Registers, Uart, UniqueMmioPointer};
+
+    const PL011_BASE_ADDRESS: *mut PL011Registers = 0x900_0000 as _;
+
+    #[repr(transparent)]
+    pub struct SerialPort(Uart<'static>);
+
+    impl SerialPort {
+        pub fn new() -> Self {
+            Self(Uart::new(unsafe { UniqueMmioPointer::new(NonNull::new(PL011_BASE_ADDRESS).unwrap()) }))
+        }
+    }
+
+    impl Write for SerialPort {
+        fn write_str(&mut self, v: &str) -> Result<(), Error> {
+            self.0.write_str(v)
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+use aarch64::SerialPort;
 
 use crossbeam_queue::ArrayQueue;
 
@@ -56,7 +110,6 @@ impl<const MAX_LEN: usize> BufferWriter<MAX_LEN> {
     }
 }
 
-const SERIAL_PORT: u16 = 0x3f8;
 struct Logger {
     uart: TimeoutMutex<Option<SerialPort>>,
     // TODO: thingbuf::StaticThingBuf with push_ref might be more efficient
@@ -115,7 +168,7 @@ pub fn set_log_level_temp(max_level: LevelFilter) -> LogLevelGuard {
 }*/
 
 pub fn init(max_level: LevelFilter) -> Result<(), SetLoggerError> {
-    let uart = unsafe { SerialPort::new_port(SERIAL_PORT, Config::default()) }.unwrap();
+    let uart = SerialPort::new();
 
     LOGGER.replace(Logger {
         uart: TimeoutMutex::new(Some(uart)),
