@@ -1071,7 +1071,7 @@ impl Context {
     }
 
     pub fn create_hw_queue(self: &Arc<Self>, create_hw_queue: &DXGKARG_CREATEHWQUEUE) -> Result<Arc<HwQueue>, NtStatus> {
-        if !matches!(self.engine, Engine::HwSched) {
+        if !self.engine.supports_hw_sched() {
             error!("{}: invalid engine for hw queue: {:?}", function!(), self.engine);
             return Err(NtStatus(STATUS::INVALID_PARAMETER));
         }

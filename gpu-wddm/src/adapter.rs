@@ -1109,44 +1109,81 @@ impl<const N: usize> core::fmt::Write for Utf16BufferWriter<N> {
     }
 }
 
+// Only Graphics engine is actually needed for Venus, others are for vDRM
+// TODO: WDDM1 builds should only expose Graphics and Paging
+//#[repr(u16)]
 #[derive(Debug, Clone, Copy)]
 pub enum Engine {
+    Blit,
+    Paging,
     Graphics,
-    HwSched,
+    VideoDecode,
+    VideoEncode,
+    VideoProcessing,
+    // TODO: we might want to expose more copy/compute engines
     Copy,
+    Compute,
     Other(u8),
-    // TODO: do we need video engine?
+}
+
+impl TryFrom<u32> for Engine {
+    type Error = u32;
+
+    fn try_from(ordinal: u32) -> Result<Self, u32> {
+        match ordinal {
+            ENGINE_BLIT => Ok(Self::Blit),
+            ENGINE_PAGING => Ok(Self::Paging),
+            ENGINE_GRAPHICS => Ok(Self::Graphics),
+            ENGINE_VIDEO_DECODE => Ok(Self::VideoDecode),
+            ENGINE_VIDEO_ENCODE => Ok(Self::VideoEncode),
+            ENGINE_VIDEO_PROCESSING => Ok(Self::VideoProcessing),
+            ENGINE_COPY => Ok(Self::Copy),
+            ENGINE_COMPUTE => Ok(Self::Compute),
+            ENGINE_OTHER_START..=ENGINE_OTHER_END => Ok(Self::Other((ordinal - ENGINE_OTHER_START) as _)),
+            _ => Err(ordinal),
+        }
+    }
+}
+
+impl Into<u32> for Engine {
+    fn into(self) -> u32 {
+        match self {
+            Self::Blit => ENGINE_BLIT,
+            Self::Paging => ENGINE_PAGING,
+            Self::Graphics => ENGINE_GRAPHICS,
+            Self::VideoDecode => ENGINE_VIDEO_DECODE,
+            Self::VideoEncode => ENGINE_VIDEO_ENCODE,
+            Self::VideoProcessing => ENGINE_VIDEO_PROCESSING,
+            Self::Copy => ENGINE_COPY,
+            Self::Compute => ENGINE_COMPUTE,
+            Self::Other(i) => {
+                let i = i as u32;
+                assert!(i < Self::OTHER_COUNT);
+                ENGINE_OTHER_START + i
+            },
+        }
+    }
 }
 
 impl Engine {
-    const GRAPHICS_ENGINE:    u32 = 0;
-    const HW_SCHED_ENGINE:    u32 = 1;
-    const COPY_ENGINE:        u32 = 2;
-    const OTHER_ENGINE_START: u32 = 3;
-    const OTHER_ENGINE_COUNT: u32 = 61;
-    const OTHER_ENGINE_END:   u32 = Engine::OTHER_ENGINE_START + Engine::OTHER_ENGINE_COUNT - 1;
+    pub const OTHER_COUNT: u32 = ENGINE_OTHER_END - ENGINE_OTHER_START;
+    pub const TOTAL_COUNT: u32 = ENGINE_OTHER_START + Engine::OTHER_COUNT;
 
-    pub const TOTAL_COUNT: u32 = Engine::OTHER_ENGINE_START + Engine::OTHER_ENGINE_COUNT;
-
-    pub const fn try_from_node_ordinal(index: u32) -> Option<Self> {
-        match index {
-            Engine::GRAPHICS_ENGINE => Some(Engine::Graphics),
-            Engine::COPY_ENGINE => Some(Engine::Copy),
-            Engine::HW_SCHED_ENGINE => Some(Engine::HwSched),
-            Engine::OTHER_ENGINE_START..=Engine::OTHER_ENGINE_END => Some(Engine::Other((index - Engine::OTHER_ENGINE_START) as _)),
-            _ => None,
-        }
+    pub fn try_from_node_ordinal(ordinal: u32) -> Option<Self> {
+        Self::try_from(ordinal).ok()
     }
 
-    pub const fn node_ordinal(&self) -> u32 {
+    pub fn node_ordinal(&self) -> u32 {
+        (*self).into()
+    }
+
+    pub const fn supports_hw_sched(&self) -> bool {
         match self {
-            Engine::Graphics => Engine::GRAPHICS_ENGINE,
-            Engine::Copy => Engine::COPY_ENGINE,
-            Engine::HwSched => Engine::HW_SCHED_ENGINE,
-            Engine::Other(i) => {
-                let i = *i as u32;
-                assert!(i < Engine::OTHER_ENGINE_COUNT);
-                Engine::OTHER_ENGINE_START + i
+            Engine::Blit | Engine::Paging => {
+                false
+            },
+            Engine::Graphics | Engine::VideoDecode | Engine::VideoEncode | Engine::VideoProcessing | Engine::Copy | Engine::Compute | Engine::Other(_) => {
+                true
             },
         }
     }
@@ -1154,58 +1191,63 @@ impl Engine {
     pub fn fill_metadata(&self, adapter: &Adapter, metadata: &mut DXGK_NODEMETADATA) {
         let mut name = Utf16BufferWriter::new();
         match self {
-            Engine::Graphics => {
-                debug!("{}: {:?} -> DXGK_ENGINE_TYPE_3D", function!(), self);
-                metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_3D;
+            Engine::Blit => {
+                metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_COPY;
             },
-            Engine::Copy => {
-                debug!("{}: {:?} -> DXGK_ENGINE_TYPE_COPY", function!(), self);
+
+            Engine::Paging => {
                 metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_COPY;
                 metadata.GpuMmuSupported = true as _;
             },
-            Engine::HwSched => {
-                debug!("{}: {:?} -> DXGK_ENGINE_TYPE_OTHER (phys)", function!(), self);
-                metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_OTHER;
+
+            Engine::Graphics => {
+                metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_3D;
                 metadata.GpuMmuSupported = true as _;
-
-                if let Some(q) = adapter.queue_handler() {
-                    let interface = q.dxgk_interface();
-
-                    //let hw_scheduling = match interface.is_feature_enabled(DXGK_FEATURE_ID::DXGK_FEATURE_HWSCH) {
-                    let hw_scheduling = match interface.query_feature_support(DXGK_FEATURE_ID::DXGK_FEATURE_HWSCH, DXGK_FEATURE_SUPPORT_ALWAYS_ON) {
-                        Ok(enabled) => enabled,
-                        Err(e) => {
-                            error!("{}: failed to query feature: {:?}", function!(), e);
-                            false
-                        },
-                    };
-                    warn!("{}: hw scheduling enabled: {:?}", function!(), hw_scheduling);
-                    metadata.Flags.set_ContextSchedulingSupported(true);
-                    metadata.Flags.set_RingBufferFenceRelease(true);
-                } else {
-                    warn!("{}: no queue handler yet", function!());
-                }
-
-                let _ = write!(name, "{:?}", self);
-                metadata.FriendlyName = name.buf;
+                metadata.Flags.set_ContextSchedulingSupported(true);
+                metadata.Flags.set_RingBufferFenceRelease(true);
             },
-            Engine::Other(_) => {
-                debug!("{}: {:?} -> DXGK_ENGINE_TYPE_OTHER", function!(), self);
+
+            Engine::VideoDecode => {
+                metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_VIDEO_DECODE;
+                metadata.GpuMmuSupported = true as _;
+                metadata.Flags.set_ContextSchedulingSupported(true);
+                metadata.Flags.set_RingBufferFenceRelease(true);
+            },
+
+            Engine::VideoEncode => {
+                metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_VIDEO_ENCODE;
+                metadata.GpuMmuSupported = true as _;
+                metadata.Flags.set_ContextSchedulingSupported(true);
+                metadata.Flags.set_RingBufferFenceRelease(true);
+            },
+
+            Engine::VideoProcessing  => {
+                metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_VIDEO_PROCESSING;
+                metadata.GpuMmuSupported = true as _;
+                metadata.Flags.set_ContextSchedulingSupported(true);
+                metadata.Flags.set_RingBufferFenceRelease(true);
+            },
+
+            Engine::Copy => {
+                metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_COPY;
+                metadata.GpuMmuSupported = true as _;
+
+                metadata.Flags.set_ContextSchedulingSupported(true);
+                metadata.Flags.set_RingBufferFenceRelease(true);
+            },
+
+            Engine::Compute | Engine::Other(_) => {
                 metadata.EngineType = DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_OTHER;
                 metadata.GpuMmuSupported = true as _;
+
+                metadata.Flags.set_ContextSchedulingSupported(true);
+                metadata.Flags.set_RingBufferFenceRelease(true);
+
                 let _ = write!(name, "{:?}", self);
                 metadata.FriendlyName = name.buf;
             },
         }
     }
-    /*
-    pub const fn dxgk_type(&self) -> DXGK_ENGINE_TYPE {
-        match self {
-            Engine::Graphics => DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_3D,
-            Engine::Other(_) => DXGK_ENGINE_TYPE::DXGK_ENGINE_TYPE_OTHER,
-        }
-    }
-    */
 }
 
 impl Adapter {
@@ -1470,6 +1512,16 @@ impl Adapter {
 
         state.empty_cursor = Some(Cursor::try_new(&chan, 64, 64, 0, 0, 0, 0)?);
 
+        //let hw_scheduling = match interface.is_feature_enabled(DXGK_FEATURE_ID::DXGK_FEATURE_HWSCH) {
+        let hw_scheduling = match chan.dxgk_interface().query_feature_support(DXGK_FEATURE_ID::DXGK_FEATURE_HWSCH, DXGK_FEATURE_SUPPORT_ALWAYS_ON) {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                error!("{}: failed to query feature: {:?}", function!(), e);
+                false
+            },
+        };
+        warn!("{}: hw scheduling enabled: {:?}", function!(), hw_scheduling);
+
         debug!("{}: system display resolution: {:?}", function!(), system_display_resolution);
         // TODO: allocate Framebuffer for this
         //if num_scanouts > 0 && state.system_display_info.is_none() {
@@ -1574,7 +1626,7 @@ impl Adapter {
                 // QEMU VirtIO-GPU cannot do IOMMU
                 //driver_caps.MemoryManagementCaps.set_IoMmuSupported(true);
 
-                driver_caps.MemoryManagementCaps.PagingNode = Engine::COPY_ENGINE;
+                driver_caps.MemoryManagementCaps.PagingNode = Engine::Paging.into();
 
                 // TODO: I don't think we can realistically support this
                 // It's the same story as with preemption all over again
@@ -1700,7 +1752,7 @@ impl Adapter {
             //    const _: () = assert!(size_of::<DXGK_PHYSICALADAPTERCAPS>() == 24);
             //    let adapter_caps = check_buffer_size!(query_info.pOutputData, query_info.OutputDataSize, DXGK_PHYSICALADAPTERCAPS)?;
             //    *adapter_caps = unsafe { zeroed() };
-            //    adapter_caps.PagingNodeIndex = Engine::COPY_ENGINE as _;
+            //    adapter_caps.PagingNodeIndex = Engine::Paging.into();
             //    Ok(())
             //},
             //DXGK_QUERYADAPTERINFOTYPE::DXGKQAITYPE_64BITONLYCAPS => {

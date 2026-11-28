@@ -30,6 +30,8 @@ use crate::{
     slice_from_raw_parts_mut,
 };
 
+use crate::adapter::Engine;
+
 /*
 
 pub const ADAPTER_INFO_TAG:           u64 = u64::from_ne_bytes(*b"VADAPINF");
@@ -94,6 +96,17 @@ pub const ALLOCATE_3D_TAG:            u64 = 0x4C4744334C4C4156u64;
 pub const ALLOCATE_BLOB_TAG:          u64 = 0x424F4C424C4C4156u64;
 
 pub const SUBMIT_COMMAND_VIRTUAL_TAG: u64 = 0x56444D4342555356u64;
+
+pub const ENGINE_BLIT:             u32 = 0;
+pub const ENGINE_PAGING:           u32 = 1;
+pub const ENGINE_GRAPHICS:         u32 = 2;
+pub const ENGINE_VIDEO_DECODE:     u32 = 3;
+pub const ENGINE_VIDEO_ENCODE:     u32 = 4;
+pub const ENGINE_VIDEO_PROCESSING: u32 = 5;
+pub const ENGINE_COPY:             u32 = 6;
+pub const ENGINE_COMPUTE:          u32 = 7;
+pub const ENGINE_OTHER_START:      u32 = 8;
+pub const ENGINE_OTHER_END:        u32 = 63;
 
 /* This should not be manually implemented, use derive instead */
 pub unsafe trait Tagged: Sized {

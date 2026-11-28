@@ -1253,7 +1253,7 @@ unsafe extern "C" fn create_context(device: HANDLE, create_context: *mut DXGKARG
         }
     } else {
         match engine {
-            Engine::Graphics => {
+            Engine::Blit => {
                 create_context.hContext = TaggedExt::into_arc_handle(context);
                 create_context.ContextInfo.DmaBufferSegmentSet = 0;
                 create_context.ContextInfo.DmaBufferSize = /*8 **/ 1024 * 1024;
@@ -1261,9 +1261,9 @@ unsafe extern "C" fn create_context(device: HANDLE, create_context: *mut DXGKARG
                 create_context.ContextInfo.AllocationListSize = 1024;
                 create_context.ContextInfo.PatchLocationListSize = 1024;
             },
-            Engine::Copy | Engine::Other(_) => {
+            Engine::Paging => {
                 if create_context.Flags.HwQueueSupported() {
-                    error!("{}: creating hw context on non-hw node {:?}", function!(), engine);
+                    error!("{}: creating hw context on non-hw engine {:?}", function!(), engine);
                 }
 
                 create_context.hContext = TaggedExt::into_arc_handle(context);
@@ -1275,7 +1275,8 @@ unsafe extern "C" fn create_context(device: HANDLE, create_context: *mut DXGKARG
                 create_context.ContextInfo.Caps.set_NoPatchingRequired(true);
                 create_context.ContextInfo.Caps.set_DriverManagesResidency(true);
             },
-            Engine::HwSched => {
+
+            Engine::Graphics | Engine::VideoDecode | Engine::VideoEncode | Engine::VideoProcessing | Engine::Copy | Engine::Compute | Engine::Other(_) => {
                 if !create_context.Flags.HwQueueSupported() {
                     error!("{}: creating non-hw context on hw node {:?}", function!(), engine);
                 }

@@ -1992,6 +1992,7 @@ impl GpuChannel {
             warn!("{}: flips queued: completed {} / submitted {}", function!(), completed, submitted);
         }
 
+        // TODO: do we even need to defer vsync notifications?
         match self.control.request_async::<_, gpu::CtrlHeader>(cmd, Callback::VSyncCompleted(scanout_id, addr)) {
             Ok(()) => Ok(()),
             Err(e) => {
