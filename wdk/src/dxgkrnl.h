@@ -2,6 +2,7 @@
 #define NTDDI_VERSION WDK_NTDDI_VERSION
 #define _KRPCENV_
 
+#include <limits.h>
 #include <intrin.h>
 #include <wtypes.h>
 #include <dispmprt.h>

@@ -56,6 +56,10 @@ mod sys {
 
     #[link(name = "bufferoverflowfastfailk")]
     unsafe extern "C" {}
+
+    #[cfg(target_arch = "aarch64")]
+    #[link(name = "libcntpr")]
+    unsafe extern "C" {}
 }
 
 pub use sys::*;
@@ -650,7 +654,10 @@ impl IrqlGuard {
 
 impl Drop for IrqlGuard {
     fn drop(&mut self) {
+        #[cfg(target_arch = "x86_64")]
         unsafe { KeLowerIrql(self.old_irql) };
+        #[cfg(target_arch = "aarch64")]
+        unsafe { KfLowerIrql(self.old_irql) };
     }
 }
 
